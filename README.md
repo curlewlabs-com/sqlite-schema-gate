@@ -246,8 +246,15 @@ written. A writer that re-attempts an insert on a hot path should guard its
   `ALTER TABLE ... DROP COLUMN` (a wrong result shows in the schema),
   `REPLACE` / `INSERT OR REPLACE` (row-level and deliberate), `DROP VIEW` or
   `DROP INDEX`. Dropping a `UNIQUE` index loosens which writes are accepted,
-  which this lint leaves to review. A double-quoted name containing `AS (`
-  inside `CREATE TABLE` or `ALTER TABLE` is reported as a generated column.
+  which this lint leaves to review.
+- **A cascade key is never retired.** It still counts after the table holding
+  it is dropped, so a migration that drops every cascading child and then the
+  parent is reported. Retiring a key exactly would mean following savepoints,
+  rollbacks and which schema each name resolves to, and a key retired wrongly
+  lets a real wipe pass. A renamed parent also keeps its key under the old
+  name, since with `PRAGMA legacy_alter_table` on and foreign keys off SQLite
+  does not rewrite the children. A `DROP TABLE` or `DELETE` whose target is a
+  single-quoted string is reported as unparseable.
 - **The seed fence admits a bare table name only.** A quoted or
   schema-qualified table (`"t"`, `main.t`) is reported, and so is a string
   holding an escaped quote (`'it''s'`), which the fence reads as two literals.
@@ -264,22 +271,9 @@ passes; "false finding" means a safe shape is reported.
 
 Migration lint:
 
-- **Missed:** `WHERE` is looked for in the text after a `DELETE`'s target,
-  string literals included, so `DELETE FROM t RETURNING 'WHERE'` passes.
-- **Missed:** a `MATCH` clause before `ON DELETE CASCADE`
-  (`REFERENCES p(id) MATCH SIMPLE ON DELETE CASCADE`) hides the cascade.
-- **Missed:** a quoted name written with no space after its keyword
-  (`DROP TABLE"t"`, `DELETE FROM"t"`, `ALTER TABLE"t" RENAME TO`,
-  `REFERENCES"t"`). SQLite accepts these, and the lint does not see them.
-- **Missed, or a false finding:** a bare name holding `$` (`p$archive`) is read
-  only up to the `$`, and a backtick-quoted parent whose name holds an escaped
-  backtick is not read as a parent.
-- **False finding:** `RENAME TO` inside a string literal of an `ALTER TABLE`
-  is read as a rename, and a rename alias is never retired, so a later drop of
-  that name is reported as a cascade wipe.
-- **False finding:** a cascade key is not retired when the table holding it is
-  dropped, so a migration that drops every cascading child and then the parent
-  is still reported.
+- **Missed:** a `MATCH` or `ON INSERT` clause written before
+  `ON DELETE CASCADE` hides the cascade, as in
+  `REFERENCES p(id) MATCH SIMPLE ON DELETE CASCADE`.
 
 Table-layout lint:
 

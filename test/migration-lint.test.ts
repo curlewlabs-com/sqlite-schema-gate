@@ -124,6 +124,17 @@ describe("cascade-parent wipe", () => {
     ).toBe(0);
   });
 
+  // A string that spells RENAME TO renames nothing; reading it as a rename
+  // makes a cascade parent of a table that parents nothing.
+  it("does not read a rename out of a string literal", () => {
+    const before = `${BEFORE}\nCREATE TABLE retired (id INTEGER PRIMARY KEY);`;
+    const aliased = `
+      ALTER TABLE authors ADD COLUMN note TEXT DEFAULT ' RENAME TO retired ';
+      DROP TABLE retired;
+    `;
+    expect(checkDataLoss(aliased, before)).toEqual([]);
+  });
+
   // A key that does not exist yet cascades nothing, so a drop before the
   // CREATE TABLE that declares it is not a wipe.
   it("does not count a cascade key created after the drop", () => {
@@ -189,6 +200,41 @@ describe("cascade-parent wipe", () => {
     ]);
   });
 
+  // SQLite accepts each of these, and each reads the same cascade key.
+  it("reads the parent whatever surrounds or spells its name", () => {
+    const parents = (child: string) =>
+      [...findCascadeParents(`CREATE TABLE c (${child});`)].sort();
+    expect(parents('p_id INTEGER REFERENCES"P"(id) ON DELETE CASCADE')).toEqual(
+      ["p"],
+    );
+    expect(
+      parents("p_id INTEGER REFERENCES p$archive ON DELETE CASCADE"),
+    ).toEqual(["p$archive"]);
+    expect(parents("p_id INTEGER REFERENCES `a``b` ON DELETE CASCADE")).toEqual(
+      ["a`b"],
+    );
+    expect(parents("p_id INTEGER REFERENCES 'p' ON DELETE CASCADE")).toEqual([
+      "p",
+    ]);
+  });
+
+  // With no space after the keyword, a quoted name is still the target, and
+  // a `$` is part of a bare name rather than the end of it.
+  it("reads drop and rename targets written without a space or with a $", () => {
+    const before = `
+      CREATE TABLE p$archive (id INTEGER PRIMARY KEY);
+      CREATE TABLE c (p_id INTEGER REFERENCES p$archive ON DELETE CASCADE);
+    `;
+    expect(rules('DROP TABLE"p$archive";', before)).toEqual([
+      "cascade-parent-wipe",
+    ]);
+    expect(
+      rules('ALTER TABLE"p$archive"RENAME TO old; DROP TABLE old;', before),
+    ).toEqual(["cascade-parent-wipe"]);
+    // `p` is a different table, and its drop cascades nothing.
+    expect(checkDataLoss("DROP TABLE p;", before)).toEqual([]);
+  });
+
   it("matches a cascade parent declared without a column list", () => {
     const before = `
       CREATE TABLE authors (id INTEGER PRIMARY KEY);
@@ -212,6 +258,8 @@ describe("cascade-parent wipe", () => {
 
 describe("unscoped row deletion", () => {
   const BEFORE = `CREATE TABLE authors (id INTEGER PRIMARY KEY);`;
+  const CASCADE_BEFORE = `${BEFORE}
+    CREATE TABLE books (author_id INTEGER REFERENCES authors ON DELETE CASCADE);`;
 
   it("fires on a DELETE with no WHERE", () => {
     expect(rules(`DELETE FROM authors;`, BEFORE)).toEqual(["unscoped-delete"]);
@@ -235,6 +283,78 @@ describe("unscoped row deletion", () => {
   it("fires when the only WHERE belongs to the CTE, not the DELETE", () => {
     const migration = `WITH doomed AS (SELECT id FROM authors WHERE id > 5) DELETE FROM authors;`;
     expect(rules(migration, BEFORE)).toEqual(["unscoped-delete"]);
+  });
+
+  // A WHERE in a string, or in a subquery after the target, is not the
+  // DELETE's own.
+  it("fires when the only WHERE is in a string or a subquery", () => {
+    expect(rules(`DELETE FROM authors RETURNING 'WHERE';`, BEFORE)).toEqual([
+      "unscoped-delete",
+    ]);
+    expect(
+      rules(`DELETE FROM authors RETURNING (SELECT 1 WHERE 1);`, BEFORE),
+    ).toEqual(["unscoped-delete"]);
+  });
+
+  it("reads a quoted target written right after FROM", () => {
+    expect(rules(`DELETE FROM"authors";`, BEFORE)).toEqual(["unscoped-delete"]);
+  });
+
+  // SQLite reads a parameter as one token, `#name` and the Tcl forms
+  // `$name(...)` included. Cut shorter, its tail would read as the DELETE's
+  // WHERE, or its parenthesis would hide the DELETE inside the CTE.
+  it("reads a parameter as SQLite cuts it", () => {
+    expect(rules(`DELETE FROM authors RETURNING #WHERE;`, BEFORE)).toEqual([
+      "unscoped-delete",
+    ]);
+    expect(
+      rules(`WITH x AS (SELECT $v(()) DELETE FROM authors;`, BEFORE),
+    ).toEqual(["unscoped-delete"]);
+  });
+
+  // Statements are split on the same tokens the checks read, so a `;`, a
+  // quote or a comment opener inside a parameter's suffix neither ends the
+  // statement nor starts a string or a comment.
+  it("splits statements where SQLite does, around a parameter", () => {
+    expect(
+      rules(`WITH x AS (SELECT $v(;)) DELETE FROM authors;`, BEFORE),
+    ).toEqual(["unscoped-delete"]);
+    expect(rules(`SELECT $v('); DROP TABLE authors;`, CASCADE_BEFORE)).toEqual([
+      "cascade-parent-wipe",
+    ]);
+    expect(rules(`SELECT $v(--); DELETE FROM authors;`, BEFORE)).toEqual([
+      "unscoped-delete",
+    ]);
+  });
+
+  // SQLite skips a byte order mark where a token could start, so one at the
+  // head of a file or statement hides nothing; inside a parameter's suffix it
+  // is part of the parameter.
+  it("reads past a byte order mark", () => {
+    expect(
+      rules("WITH x AS (SELECT $v(\ufeff;)) DELETE FROM authors;", BEFORE),
+    ).toEqual(["unscoped-delete"]);
+    expect(rules("\ufeffDELETE FROM authors;", BEFORE)).toEqual([
+      "unscoped-delete",
+    ]);
+    expect(
+      findCascadeParents(
+        "\ufeffCREATE TABLE c (p_id INTEGER REFERENCES p ON DELETE CASCADE);",
+      ),
+    ).toEqual(new Set(["p"]));
+  });
+
+  // SQLite's whitespace is ASCII; a non-breaking space is part of a name, so
+  // `WHERE` followed by one is an alias, not the keyword.
+  it("reads a non-breaking space as part of a name", () => {
+    expect(rules(`DELETE FROM authors AS WHERE\u00a0;`, BEFORE)).toEqual([
+      "unscoped-delete",
+    ]);
+    expect(
+      findCascadeParents(
+        "CREATE TABLE c (p_id INTEGER REFERENCES \u00a0p ON DELETE CASCADE);",
+      ),
+    ).toEqual(new Set(["\u00a0p"]));
   });
 
   it("stays silent on a CTE-prefixed DELETE that is scoped", () => {
@@ -363,6 +483,12 @@ describe("generated columns", () => {
       WITH doomed AS (SELECT id FROM authors WHERE id > 5) DELETE FROM authors WHERE id IN (SELECT id FROM doomed);
       ALTER TABLE authors ADD COLUMN casted TEXT CHECK (CAST(casted AS INTEGER) >= 0);
     `;
+    expect(checkDataLoss(migration, BEFORE)).toEqual([]);
+  });
+
+  // A quoted name is a name, whatever it spells.
+  it("stays silent on a quoted column name that spells AS (", () => {
+    const migration = `ALTER TABLE authors ADD COLUMN "alias AS (x" TEXT;`;
     expect(checkDataLoss(migration, BEFORE)).toEqual([]);
   });
 
