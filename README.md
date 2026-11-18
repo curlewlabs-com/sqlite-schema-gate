@@ -190,10 +190,11 @@ A statement passes only if it is
 `INSERT OR IGNORE INTO <table> (<columns>) VALUES (<literals>), ...` into one of
 the named tables. The column list is required, and each value is a number,
 `NULL` or a quoted string. Everything else is a finding, as is a row that
-repeats an identity column's value from an earlier row in the file or leaves an
-identity column out. Name only tables where appending a row is inert for
-everything that already read the table. A table whose rows decide behavior does
-not belong in a file that converges silently on every deploy.
+repeats an identity column's value from an earlier row in the file, leaves an
+identity column out, or gives one `NULL`, which SQLite never reads as a
+conflict. Name only tables where appending a row is inert for everything that
+already read the table. A table whose rows decide behavior does not belong in a
+file that converges silently on every deploy.
 
 The fence does not read your schema, so the identity columns you name are a
 declaration. Hold them to the schema with a test that reads
@@ -211,7 +212,7 @@ for `OR IGNORE` to conflict on, its rows are inserted again on every apply.
 | layout    | `fk-explicit-on-delete`                       | a foreign key with no `ON DELETE` clause; write `ON DELETE NO ACTION` when that is the intent                                                                   |
 | layout    | `integer-pk-needs-autoincrement-on-fk-target` | an `INTEGER PRIMARY KEY` without `AUTOINCREMENT` on a table some foreign key references                                                                         |
 | layout    | `fk-needs-lead-index`                         | a foreign key column that is not its table's primary key and leads no index                                                                                     |
-| migration | `cascade-parent-wipe`                         | `DROP TABLE` of a table that parents an `ON DELETE CASCADE` foreign key, directly or after a rename                                                             |
+| migration | `cascade-parent-wipe`                         | `DROP TABLE` of a table that parents an `ON DELETE CASCADE` foreign key declared before the migration or earlier in it, directly or after a rename              |
 | migration | `unscoped-delete`                             | a `DELETE` with no `WHERE` of its own (a CTE's `WHERE` does not count)                                                                                          |
 | migration | `unparseable-target`                          | a `DROP TABLE` or `DELETE` whose target does not parse                                                                                                          |
 | migration | `trigger-semantics`                           | `CREATE TRIGGER` or `DROP TRIGGER`                                                                                                                              |
@@ -219,7 +220,7 @@ for `OR IGNORE` to conflict on, its rows are inserted again on every apply.
 | seed      | `not-insert-or-ignore`                        | a statement that is not `INSERT OR IGNORE INTO <bare table> (<columns>) ...`                                                                                    |
 | seed      | `table-not-allowlisted`                       | a row for a table not among the seed tables                                                                                                                     |
 | seed      | `non-literal-rows`                            | anything after the column list other than literal `VALUES` tuples: a `SELECT`, an expression, `ON CONFLICT`, `RETURNING`                                        |
-| seed      | `duplicate-authored-identity`                 | a row that repeats an identity value an earlier row in the file used, or omits an identity column                                                               |
+| seed      | `duplicate-authored-identity`                 | a row that repeats an identity value an earlier row in the file used, gives an identity column `NULL`, or omits one                                             |
 
 `AUTOINCREMENT` has a cost a writer should plan for. An insert attempt reserves
 the next id, a durable write to `sqlite_sequence` that D1 bills as a row
@@ -263,10 +264,6 @@ passes; "false finding" means a safe shape is reported.
 
 Migration lint:
 
-- **Missed:** a cascade relationship created inside the migration being
-  checked. Parents are read from the schema before the migration, plus renames
-  within it, so a migration that adds an `ON DELETE CASCADE` child, copies rows
-  into it and then drops the parent is not reported.
 - **Missed:** `WHERE` is looked for in the text after a `DELETE`'s target,
   string literals included, so `DELETE FROM t RETURNING 'WHERE'` passes.
 - **Missed:** a `MATCH` clause before `ON DELETE CASCADE`
@@ -280,6 +277,9 @@ Migration lint:
 - **False finding:** `RENAME TO` inside a string literal of an `ALTER TABLE`
   is read as a rename, and a rename alias is never retired, so a later drop of
   that name is reported as a cascade wipe.
+- **False finding:** a cascade key is not retired when the table holding it is
+  dropped, so a migration that drops every cascading child and then the parent
+  is still reported.
 
 Table-layout lint:
 
@@ -304,8 +304,6 @@ Table-layout lint:
 
 Seed fence:
 
-- **Missed:** an identity value written as `NULL`. For an `INTEGER PRIMARY KEY`
-  SQLite then assigns a new id, so the row is added again on every apply.
 - **Missed:** identity comparison ignores type affinity and collation: `1` and
   `'1'` in an `INTEGER` column, or `'USD'` and `'usd'` under `COLLATE NOCASE`,
   are read as different rows.

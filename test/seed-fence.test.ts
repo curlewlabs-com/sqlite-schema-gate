@@ -169,6 +169,46 @@ describe("a row that collides with one the file already wrote", () => {
   });
 });
 
+describe("NULL identity values", () => {
+  // An INTEGER PRIMARY KEY given NULL takes a new rowid, so a row whose only
+  // identity is that key is appended again on every apply and the table grows
+  // by one copy per deploy.
+  it("fires on NULL in an integer primary key", () => {
+    expect(
+      rules("INSERT OR IGNORE INTO tags (id, name) VALUES (NULL, 'x');", {
+        tags: ["id"],
+      }),
+    ).toEqual(["duplicate-authored-identity"]);
+  });
+
+  // A UNIQUE column holds any number of NULLs, so NULL there is no identity
+  // either, in any case it is written in. Two such rows are each reported
+  // once, not once more as a repeat of the other.
+  it("fires once per NULL in a UNIQUE identity column, in any case", () => {
+    const findings = checkDataSeed(
+      `INSERT OR IGNORE INTO currencies (id, iso_code) VALUES (23, null), (24, NULL);`,
+      TABLES,
+    );
+    expect(findings.map((f) => f.rule)).toEqual([
+      "duplicate-authored-identity",
+      "duplicate-authored-identity",
+    ]);
+    expect(findings[0]?.message).toContain(
+      "`currencies.iso_code` the value NULL",
+    );
+  });
+
+  // NULL outside the identity columns is ordinary content, as the
+  // tuple-grammar case below also holds.
+  it("stays silent on NULL in a column that is not an identity", () => {
+    expect(
+      rules(
+        "INSERT OR IGNORE INTO tax_rates (id, starts_at, label) VALUES (9, 1, NULL);",
+      ),
+    ).toEqual([]);
+  });
+});
+
 describe("targets outside the seed tables", () => {
   it("fires on a table that is not a seed table", () => {
     expect(

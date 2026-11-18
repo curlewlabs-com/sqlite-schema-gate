@@ -49,6 +49,9 @@
 //   Omitted identity column ....... the column list is required, and a row that leaves an
 //                                   identity column to a DEFAULT this fence cannot evaluate is a
 //                                   finding, not a skip.
+//   NULL identity value ........... a finding for the same reason: SQLite never reads NULL as a
+//                                   conflict, so the database, not the file, decides the row's
+//                                   identity in that column.
 
 import { excerpt, keywordView, tokenizeStatements } from "./sql-text";
 
@@ -284,6 +287,23 @@ export function checkDataSeed(
               `columns SQLite treats as this table's identity. Without it the row's identity ` +
               `is decided by a DEFAULT this fence cannot evaluate, so it cannot be proved ` +
               `distinct from the rows already written above it.`,
+          });
+          continue;
+        }
+        // NULL never conflicts: an INTEGER PRIMARY KEY given NULL takes a new
+        // rowid, and a UNIQUE column holds any number of NULLs. Such a value
+        // is an identity the database picks, as an omitted one is, and where
+        // it is the row's only identity the row is added on every apply.
+        if (/^NULL$/i.test(values[at])) {
+          findings.push({
+            rule: "duplicate-authored-identity",
+            message:
+              `${excerpt(raw)} gives \`${table}.${column}\` the value NULL, one of the ` +
+              `columns SQLite treats as this table's identity. NULL never conflicts: an ` +
+              `INTEGER PRIMARY KEY given NULL takes a new rowid, and a UNIQUE column holds ` +
+              `any number of NULLs. So \`OR IGNORE\` cannot recognize the row by this column ` +
+              `on the next apply, and a row with no other identity is added again on every ` +
+              `apply. Write the identity value.`,
           });
           continue;
         }
