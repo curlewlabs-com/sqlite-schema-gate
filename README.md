@@ -231,23 +231,23 @@ every apply.
 
 ## The rules
 
-| Lint      | Rule id                                       | Reports                                                                                                                                                         |
-| --------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| layout    | `strict-required`                             | a table not declared `STRICT`                                                                                                                                   |
-| layout    | `blob-pk-or-unique-needs-check-length`        | a `BLOB` primary key or single-column `UNIQUE` with no `CHECK (length(col) = N)`; a `BLOB` that is a foreign key is exempt, since its parent's check governs it |
-| layout    | `fk-type-matches-parent`                      | a foreign key column whose declared type differs from the parent column's                                                                                       |
-| layout    | `fk-explicit-on-delete`                       | a foreign key with no `ON DELETE` clause; write `ON DELETE NO ACTION` when that is the intent                                                                   |
-| layout    | `integer-pk-needs-autoincrement-on-fk-target` | an `INTEGER PRIMARY KEY` without `AUTOINCREMENT` on a table some foreign key references                                                                         |
-| layout    | `fk-needs-lead-index`                         | a foreign key column that is not its table's primary key and leads no index                                                                                     |
-| migration | `cascade-parent-wipe`                         | `DROP TABLE` of a table that parents an `ON DELETE CASCADE` foreign key declared before the migration or earlier in it, directly or after a rename              |
-| migration | `unscoped-delete`                             | a `DELETE` with no `WHERE` of its own (a CTE's `WHERE` does not count)                                                                                          |
-| migration | `unparseable-target`                          | a `DROP TABLE` or `DELETE` whose target does not parse                                                                                                          |
-| migration | `trigger-semantics`                           | `CREATE TRIGGER` or `DROP TRIGGER`                                                                                                                              |
-| migration | `generated-column-semantics`                  | a generated column in `CREATE TABLE` or `ALTER TABLE`                                                                                                           |
-| seed      | `not-insert-or-ignore`                        | a statement that is not `INSERT OR IGNORE INTO <bare table> (<columns>) ...`                                                                                    |
-| seed      | `table-not-allowlisted`                       | a row for a table not among the seed tables                                                                                                                     |
-| seed      | `non-literal-rows`                            | anything after the column list other than literal `VALUES` tuples: a `SELECT`, an expression, `ON CONFLICT`, `RETURNING`                                        |
-| seed      | `duplicate-authored-identity`                 | a row that repeats an identity value an earlier row in the file used, gives an identity column `NULL`, or omits one                                             |
+| Lint      | Rule id                                       | Reports                                                                                                                                                                          |
+| --------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| layout    | `strict-required`                             | a table not declared `STRICT`                                                                                                                                                    |
+| layout    | `blob-pk-or-unique-needs-check-length`        | a `BLOB` primary key or single-column `UNIQUE` with no `CHECK (length(col) = N)`; a foreign key to another column with that check, whose other columns are `NOT NULL`, is exempt |
+| layout    | `fk-type-matches-parent`                      | a foreign key column whose declared type differs from the parent column's                                                                                                        |
+| layout    | `fk-explicit-on-delete`                       | a foreign key with no `ON DELETE` clause; write `ON DELETE NO ACTION` when that is the intent                                                                                    |
+| layout    | `integer-pk-needs-autoincrement-on-fk-target` | an `INTEGER PRIMARY KEY` without `AUTOINCREMENT` on a table some foreign key references                                                                                          |
+| layout    | `fk-needs-lead-index`                         | a foreign key none of whose columns is the primary key's first or leads an index the constraint check can use                                                                    |
+| migration | `cascade-parent-wipe`                         | `DROP TABLE` of a table that parents an `ON DELETE CASCADE` foreign key declared before the migration or earlier in it, directly or after a rename                               |
+| migration | `unscoped-delete`                             | a `DELETE` with no `WHERE` of its own (a CTE's `WHERE` does not count)                                                                                                           |
+| migration | `unparseable-target`                          | a `DROP TABLE` or `DELETE` whose target does not parse                                                                                                                           |
+| migration | `trigger-semantics`                           | `CREATE TRIGGER` or `DROP TRIGGER`                                                                                                                                               |
+| migration | `generated-column-semantics`                  | a generated column in `CREATE TABLE` or `ALTER TABLE`                                                                                                                            |
+| seed      | `not-insert-or-ignore`                        | a statement that is not `INSERT OR IGNORE INTO <bare table> (<columns>) ...`                                                                                                     |
+| seed      | `table-not-allowlisted`                       | a row for a table not among the seed tables                                                                                                                                      |
+| seed      | `non-literal-rows`                            | anything after the column list other than literal `VALUES` tuples: a `SELECT`, an expression, `ON CONFLICT`, `RETURNING`                                                         |
+| seed      | `duplicate-authored-identity`                 | a row that repeats an identity value an earlier row in the file used, gives an identity column `NULL`, or omits one                                                              |
 
 `AUTOINCREMENT` has a cost a writer should plan for. An insert attempt reserves
 the next id, a durable write to `sqlite_sequence` that D1 bills as a row
@@ -268,6 +268,11 @@ written. A writer that re-attempts an insert on a hot path should guard its
   the rule reports it.
 - **`fk-type-matches-parent` compares declared type names as text**, so `INT`
   and `INTEGER` differ even where SQLite gives them the same affinity.
+- **`fk-needs-lead-index` counts an index by its lead column only.** A partial
+  index counts whatever its `WHERE`, and an index whose `COLLATE` differs from
+  the one the parent key compares under counts too, though either can leave
+  the constraint check scanning. Judging a `WHERE` needs an expression parser
+  this package does not have, and a wrong judgment would pass a scan.
 - **The migration lint reads text, not a database.** It does not cover
   `ALTER TABLE ... DROP COLUMN` (a wrong result shows in the schema),
   `REPLACE` / `INSERT OR REPLACE` (row-level and deliberate), `DROP VIEW` or
@@ -295,24 +300,6 @@ written. A writer that re-attempts an insert on a hot path should guard its
   suppressing its finding after the key is pointed at another parent, so
   re-read the reasons on a table whose keys change.
 - Version 0.x carries no compatibility promise between minor versions.
-
-## Known issues
-
-Each of these is a case a check gets wrong today. "Missed" means a real hazard
-passes; "false finding" means a safe shape is reported.
-
-Table-layout lint:
-
-- **Missed:** `fk-needs-lead-index` counts any primary-key membership, and any
-  index that leads with the column, partial ones included, as coverage.
-- **Missed:** `fk-type-matches-parent` and
-  `integer-pk-needs-autoincrement-on-fk-target` look the parent up by the name
-  exactly as the foreign key writes it, so `REFERENCES AUTHORS(ID)` against a
-  table declared `authors` is skipped. A composite key that names no parent
-  columns is compared component by component against the parent's first
-  primary-key column.
-- **Missed:** a `BLOB` foreign key is exempt from the length rule even when its
-  parent has no length check, including when it references itself.
 
 ## License
 

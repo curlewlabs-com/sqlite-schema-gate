@@ -220,6 +220,87 @@ describe("blob-pk-or-unique-needs-check-length", () => {
       ),
     ).toEqual(["spelled.slug"]);
   });
+
+  // The exemption defers to a referenced column's CHECK. A key whose parent
+  // has none, or that references only itself, has nothing to defer to; one
+  // that references a checked column, in its own table or beside an
+  // unchecked one, is checked by it.
+  it("exempts a BLOB key only when a column it references is checked", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE loose_links (slug BLOB PRIMARY KEY) STRICT;
+         CREATE TABLE loose_visits (
+           slug BLOB PRIMARY KEY REFERENCES loose_links(slug) ON DELETE CASCADE
+         ) STRICT;
+         CREATE TABLE loops (
+           id BLOB PRIMARY KEY REFERENCES loops(id) ON DELETE CASCADE
+         ) STRICT;
+         CREATE TABLE revisions (
+           id BLOB PRIMARY KEY CHECK (length(id) = 16),
+           parent_id BLOB UNIQUE REFERENCES revisions(id) ON DELETE CASCADE
+         ) STRICT;
+         CREATE TABLE checked_links (slug BLOB PRIMARY KEY CHECK (length(slug) = 16)) STRICT;
+         CREATE TABLE both_visits (
+           slug BLOB PRIMARY KEY
+             REFERENCES loose_links(slug) ON DELETE CASCADE
+             REFERENCES checked_links(slug) ON DELETE CASCADE
+         ) STRICT`,
+        "blob-pk-or-unique-needs-check-length",
+      ),
+    ).toEqual(["loops.id", "loose_links.slug", "loose_visits.slug"]);
+  });
+
+  // SQLite does not check a composite key any of whose columns is NULL, so a
+  // companion column that may be NULL lets any bytes through.
+  it("exempts a BLOB in a composite key only when its companions are NOT NULL", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE scopes (
+           id BLOB NOT NULL CHECK (length(id) = 16),
+           scope INTEGER NOT NULL,
+           PRIMARY KEY (id, scope)
+         ) STRICT;
+         CREATE TABLE loose (
+           id BLOB PRIMARY KEY,
+           scope INTEGER,
+           FOREIGN KEY (id, scope) REFERENCES scopes ON DELETE CASCADE
+         ) STRICT;
+         CREATE TABLE strict_pairs (
+           id BLOB PRIMARY KEY,
+           scope INTEGER NOT NULL,
+           FOREIGN KEY (id, scope) REFERENCES scopes ON DELETE CASCADE
+         ) STRICT`,
+        "blob-pk-or-unique-needs-check-length",
+      ),
+    ).toEqual(["loose.id"]);
+  });
+
+  // An INTEGER PRIMARY KEY that aliases the rowid never holds NULL, though
+  // the pragma reports it nullable, so as a companion it keeps the key
+  // checked. One declared DESC is no alias, and outside STRICT it may hold
+  // NULL.
+  it("counts a rowid alias companion as NOT NULL", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE tokens (
+           b BLOB NOT NULL CHECK (length(b) = 16),
+           n INTEGER NOT NULL,
+           PRIMARY KEY (b, n)
+         ) STRICT;
+         CREATE TABLE uses (
+           n INTEGER PRIMARY KEY,
+           b BLOB UNIQUE,
+           FOREIGN KEY (b, n) REFERENCES tokens ON DELETE CASCADE
+         );
+         CREATE TABLE late_uses (
+           n INTEGER PRIMARY KEY DESC,
+           b BLOB UNIQUE,
+           FOREIGN KEY (b, n) REFERENCES tokens ON DELETE CASCADE
+         )`,
+        "blob-pk-or-unique-needs-check-length",
+      ),
+    ).toEqual(["late_uses.b"]);
+  });
 });
 
 describe("fk-type-matches-parent", () => {
@@ -249,6 +330,43 @@ describe("fk-type-matches-parent", () => {
         "fk-type-matches-parent",
       ),
     ).toEqual(["books.author_handle"]);
+  });
+
+  // SQLite resolves a foreign key's parent with case folded, so the parent
+  // is found however the key spells it.
+  it("finds a parent written in another case", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+         CREATE TABLE books (
+           id INTEGER PRIMARY KEY,
+           author_id TEXT REFERENCES AUTHORS(ID) ON DELETE CASCADE
+         ) STRICT`,
+        "fk-type-matches-parent",
+      ),
+    ).toEqual(["books.author_id"]);
+  });
+
+  // A composite key with no parent columns maps each of its columns to the
+  // parent's primary key column at the same position, which need not be the
+  // order the parent declares its columns in.
+  it("compares a composite key position by position", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE editions (
+           isbn TEXT NOT NULL,
+           printing INTEGER NOT NULL,
+           PRIMARY KEY (printing, isbn)
+         ) STRICT;
+         CREATE TABLE copies (
+           id INTEGER PRIMARY KEY,
+           printing TEXT,
+           isbn TEXT,
+           FOREIGN KEY (printing, isbn) REFERENCES editions ON DELETE CASCADE
+         ) STRICT`,
+        "fk-type-matches-parent",
+      ),
+    ).toEqual(["copies.printing"]);
   });
 });
 
@@ -424,6 +542,20 @@ describe("integer-pk-needs-autoincrement-on-fk-target", () => {
       ),
     ).toEqual(["authors"]);
   });
+
+  // The target is found however the key spells its name.
+  it("counts a target named in another case", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE authors (id INTEGER PRIMARY KEY) STRICT;
+         CREATE TABLE books (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           author_id INTEGER REFERENCES AUTHORS(ID) ON DELETE CASCADE
+         ) STRICT`,
+        "integer-pk-needs-autoincrement-on-fk-target",
+      ),
+    ).toEqual(["authors"]);
+  });
 });
 
 describe("fk-needs-lead-index", () => {
@@ -460,6 +592,52 @@ describe("fk-needs-lead-index", () => {
         "fk-needs-lead-index",
       ),
     ).toEqual([]);
+  });
+
+  // A composite key's check looks the child up by all of its columns at
+  // once, so a primary key or index that leads with any of them serves it.
+  it("reads a composite key as one key", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE editions (isbn TEXT, printing INTEGER, PRIMARY KEY (isbn, printing)) STRICT;
+         CREATE TABLE copies (
+           isbn TEXT,
+           printing INTEGER,
+           PRIMARY KEY (isbn, printing),
+           FOREIGN KEY (isbn, printing) REFERENCES editions ON DELETE CASCADE
+         ) STRICT;
+         CREATE TABLE loans (
+           id INTEGER PRIMARY KEY,
+           isbn TEXT,
+           printing INTEGER,
+           FOREIGN KEY (isbn, printing) REFERENCES editions ON DELETE CASCADE
+         ) STRICT;
+         CREATE TABLE holds (
+           id INTEGER PRIMARY KEY,
+           isbn TEXT,
+           printing INTEGER,
+           FOREIGN KEY (isbn, printing) REFERENCES editions ON DELETE CASCADE
+         ) STRICT;
+         CREATE INDEX idx_holds_printing ON holds(printing)`,
+        "fk-needs-lead-index",
+      ),
+    ).toEqual(["loans.isbn"]);
+  });
+
+  // Only the primary key's first column can be sought into.
+  it("counts only the primary key's first column as an index", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+         CREATE TABLE groups (id INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+         CREATE TABLE memberships (
+           group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+           author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE,
+           PRIMARY KEY (group_id, author_id)
+         ) STRICT`,
+        "fk-needs-lead-index",
+      ),
+    ).toEqual(["memberships.author_id"]);
   });
 });
 
