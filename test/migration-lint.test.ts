@@ -47,6 +47,19 @@ describe("cascade-parent wipe", () => {
     expect(rules(migration, BEFORE)).toEqual(["cascade-parent-wipe"]);
   });
 
+  // The rename is found by one whitespace character on each side of
+  // RENAME TO, so runs of spaces and line breaks around it must still read
+  // as the same rename.
+  it("tracks a rename written across lines and runs of spaces", () => {
+    const migration = `
+      ALTER TABLE authors
+          RENAME   TO
+        authors_old;
+      DROP TABLE authors_old;
+    `;
+    expect(rules(migration, BEFORE)).toEqual(["cascade-parent-wipe"]);
+  });
+
   // Most drops are of leaf tables. Firing on those would make the lint noise,
   // and a noisy lint gets switched off.
   it("stays silent when the dropped table has no cascading children", () => {
