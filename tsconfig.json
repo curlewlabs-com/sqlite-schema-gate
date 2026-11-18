@@ -1,0 +1,27 @@
+{
+  // The sources run wherever the caller's database does, so they take no
+  // runtime's types: they declare the database shape they read (src/database.ts)
+  // and D1's binding satisfies it. The tests have their own program
+  // (test/tsconfig.json) under the Workers test runtime's types.
+  //
+  // rootDir is the package boundary: tsc refuses any source the program
+  // reaches outside src/ (TS6059).
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "types": [],
+    "rootDir": "src",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"]
+}
