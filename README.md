@@ -261,12 +261,11 @@ written. A writer that re-attempts an insert on a hot path should guard its
 - **The layout reader is tested on D1 in the Workers test runtime only.** Any
   object with the same `prepare`/`all`/`batch` shape will run, such as a few
   lines over another SQLite driver, but nothing else is tested.
-- **Three layout rules read the table's `CREATE` text with patterns:** the
-  length `CHECK`, the `ON DELETE` clause and `AUTOINCREMENT`. They read names
-  written bare, in the case the schema uses, with the clause in its usual
-  place. A name written quoted in that text (`length("slug")`,
-  `REFERENCES "authors"`) does not match, and the rule reports a finding that
-  is not real; allowlist it, or write the name bare.
+- **Three layout rules read the table's `CREATE` text:** the length `CHECK`,
+  the `ON DELETE` clause and `AUTOINCREMENT`. The length check is read only in
+  the form `CHECK (length(col) = N)`; a check written another way, such as
+  `CHECK (N = length(col))` or inside a longer expression, is not seen, and
+  the rule reports it.
 - **`fk-type-matches-parent` compares declared type names as text**, so `INT`
   and `INTEGER` differ even where SQLite gives them the same affinity.
 - **The migration lint reads text, not a database.** It does not cover
@@ -304,9 +303,6 @@ passes; "false finding" means a safe shape is reported.
 
 Table-layout lint:
 
-- **Missed:** the length `CHECK`, `ON DELETE` and `AUTOINCREMENT` patterns can
-  be satisfied by other text in the same `CREATE TABLE`, such as a string
-  default that spells the clause.
 - **Missed:** generated columns. `pragma_table_info` does not list them, so no
   rule reads them.
 - **Missed:** `fk-needs-lead-index` counts any primary-key membership, and any
@@ -319,9 +315,6 @@ Table-layout lint:
   primary-key column.
 - **Missed:** a `BLOB` foreign key is exempt from the length rule even when its
   parent has no length check, including when it references itself.
-- **False finding:** `integer-pk-needs-autoincrement-on-fk-target` reports an
-  `INTEGER PRIMARY KEY` of a `WITHOUT ROWID` table, or one declared `DESC`,
-  neither of which is a rowid alias.
 
 ## License
 
