@@ -303,8 +303,6 @@ passes; "false finding" means a safe shape is reported.
 
 Table-layout lint:
 
-- **Missed:** generated columns. `pragma_table_info` does not list them, so no
-  rule reads them.
 - **Missed:** `fk-needs-lead-index` counts any primary-key membership, and any
   index that leads with the column, partial ones included, as coverage.
 - **Missed:** `fk-type-matches-parent` and
