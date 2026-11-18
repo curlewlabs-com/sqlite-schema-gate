@@ -109,6 +109,31 @@ describe("readSchema", () => {
     ]);
   });
 
+  // A generated column is a column every rule has to see: one can be a
+  // UNIQUE BLOB key or a foreign key like any other.
+  it("reads generated columns", async () => {
+    await applySchema(`
+      CREATE TABLE files (
+        id INTEGER PRIMARY KEY,
+        body BLOB NOT NULL,
+        digest BLOB GENERATED ALWAYS AS (substr(body, 1, 8)) STORED UNIQUE,
+        size INTEGER AS (length(body))
+      ) STRICT
+    `);
+    const snapshot = await readSchema(env.DB);
+    expect(snapshot.columns.get("files")?.map((c) => c.name)).toEqual([
+      "id",
+      "body",
+      "digest",
+      "size",
+    ]);
+    expect(
+      lintSchemaLayout(snapshot)
+        .filter((f) => f.rule === "blob-pk-or-unique-needs-check-length")
+        .map((f) => f.column),
+    ).toEqual(["digest"]);
+  });
+
   // An empty schema is a normal call, and D1 refuses an empty batch.
   it("reads a schema with no tables", async () => {
     const snapshot = await readSchema(env.DB);

@@ -11,8 +11,9 @@ export interface UserTable {
   strict: boolean;
 }
 
-// One row of pragma_table_info. `pk` is the column's 1-based position in the
-// primary key, 0 when it is not part of one.
+// One column as pragma_table_xinfo reports it, generated columns included.
+// `pk` is the column's 1-based position in the primary key, 0 when it is not
+// part of one.
 export interface ColumnInfo {
   name: string;
   type: string;
@@ -118,8 +119,12 @@ export async function readSchema(db: SchemaDatabase): Promise<SchemaSnapshot> {
     db,
     tableNames,
     (table) =>
+      // table_xinfo rather than table_info, which leaves generated columns
+      // out, and with them every rule a generated column can break. Hidden
+      // 1 is a virtual table's hidden column, which no table read here has.
       `SELECT name, type, "notnull" AS not_null, dflt_value, pk
-       FROM pragma_table_info(${pragmaArg(table)})`,
+       FROM pragma_table_xinfo(${pragmaArg(table)})
+       WHERE hidden <> 1`,
   );
   const foreignKeys = await pragmaByName<ForeignKey>(
     db,
