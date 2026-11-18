@@ -22,4 +22,4 @@ This is test-time and CI tooling, and it has no runtime dependencies.
   privileges.
 - **What a pass means.** Each check reports only the hazards its README section
   names. A file it passes can still be wrong in ways it does not read; the
-  README's "Limits" lists the known ones.
+  README's "Limits" and "Known issues" list the known ones.

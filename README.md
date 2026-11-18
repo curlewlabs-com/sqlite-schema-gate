@@ -248,7 +248,62 @@ written. A writer that re-attempts an insert on a hot path should guard its
 - **The seed fence admits a bare table name only.** A quoted or
   schema-qualified table (`"t"`, `main.t`) is reported, and so is a string
   holding an escaped quote (`'it''s'`), which the fence reads as two literals.
+- **An allowlist entry is keyed by rule, table and the fields it names**, not by
+  the relationship it was written about. An entry for a foreign key column keeps
+  suppressing its finding after the key is pointed at another parent, so
+  re-read the reasons on a table whose keys change.
 - Version 0.x carries no compatibility promise between minor versions.
+
+## Known issues
+
+Each of these is a case a check gets wrong today. "Missed" means a real hazard
+passes; "false finding" means a safe shape is reported.
+
+Migration lint:
+
+- **Missed:** a cascade relationship created inside the migration being
+  checked. Parents are read from the schema before the migration, plus renames
+  within it, so a migration that adds an `ON DELETE CASCADE` child, copies rows
+  into it and then drops the parent is not reported.
+- **Missed:** `WHERE` is looked for in the text after a `DELETE`'s target,
+  string literals included, so `DELETE FROM t RETURNING 'WHERE'` passes.
+- **Missed:** a `MATCH` clause before `ON DELETE CASCADE`
+  (`REFERENCES p(id) MATCH SIMPLE ON DELETE CASCADE`) hides the cascade.
+- **False finding:** `RENAME TO` inside a string literal of an `ALTER TABLE`
+  is read as a rename, and a rename alias is never retired, so a later drop of
+  that name is reported as a cascade wipe.
+
+Table-layout lint:
+
+- **Missed:** the length `CHECK`, `ON DELETE` and `AUTOINCREMENT` patterns can
+  be satisfied by other text in the same `CREATE TABLE`, such as a string
+  default that spells the clause.
+- **Missed:** generated columns. `pragma_table_info` does not list them, so no
+  rule reads them.
+- **Missed:** `fk-needs-lead-index` counts any primary-key membership, and any
+  index that leads with the column, partial ones included, as coverage.
+- **Missed:** `fk-type-matches-parent` and
+  `integer-pk-needs-autoincrement-on-fk-target` look the parent up by the name
+  exactly as the foreign key writes it, so `REFERENCES AUTHORS(ID)` against a
+  table declared `authors` is skipped. A composite key that names no parent
+  columns is compared component by component against the parent's first
+  primary-key column.
+- **Missed:** a `BLOB` foreign key is exempt from the length rule even when its
+  parent has no length check, including when it references itself.
+- **False finding:** `integer-pk-needs-autoincrement-on-fk-target` reports an
+  `INTEGER PRIMARY KEY` of a `WITHOUT ROWID` table, or one declared `DESC`,
+  neither of which is a rowid alias.
+
+Seed fence:
+
+- **Missed:** an identity value written as `NULL`. For an `INTEGER PRIMARY KEY`
+  SQLite then assigns a new id, so the row is added again on every apply.
+- **Missed:** identity comparison ignores type affinity and collation: `1` and
+  `'1'` in an `INTEGER` column, or `'USD'` and `'usd'` under `COLLATE NOCASE`,
+  are read as different rows.
+- **False finding:** identity columns are compared one at a time, so the rows
+  of a composite `UNIQUE (a, b)` that share one column are reported; and
+  integers beyond 2^53 are compared after rounding.
 
 ## License
 
