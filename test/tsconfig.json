@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // D1Database and the cloudflare:test module come from these. The vitest
+    // config is in this program too, so tsc checks the pool options.
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types"],
+    "rootDir": ".."
+  },
+  "include": ["../src/**/*.ts", "./**/*.ts", "../vitest.config.ts"]
+}

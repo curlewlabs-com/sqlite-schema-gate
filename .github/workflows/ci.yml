@@ -1,0 +1,76 @@
+name: CI
+
+# Every pull request and push to main runs the checks a contributor runs
+# locally. The weekly run catches what moves outside this repository - the
+# runner image - before a consumer's suite does.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # renovate: datasource=github-releases depName=oven-sh/bun extractVersion=^bun-v(?<version>.+)$
+          bun-version: 1.4.4
+      - name: Install the locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Test on D1 in workerd
+        run: bun run test
+      - name: Pack
+        # The release asset consumers pin is this tarball; packing it on every
+        # run keeps the `files` list from drifting away from what the tests
+        # cover.
+        run: |
+          npm pack --dry-run --json > "$RUNNER_TEMP/pack.json"
+          node -e '
+            const [p] = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            const files = p.files.map((f) => f.path).sort();
+            console.log(files.join("\n"));
+            if (!files.includes("src/index.ts")) process.exit(1);
+            if (files.some((f) => f.startsWith("test/"))) process.exit(1);
+          ' "$RUNNER_TEMP/pack.json"
+
+  baseline:
+    # The checks every Curlew Labs repository runs, in one place:
+    # https://github.com/curlewlabs-com/ci-baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: curlewlabs-com/ci-baseline@f05f17a38ba2dfbaf0cde130a375b346e9a923a2 # v0.2.0
+
+  # The one check branch protection requires, so adding a job means adding it
+  # to needs here rather than editing the repository's settings.
+  conclusion:
+    needs: [test, baseline]
+    runs-on: ubuntu-24.04
+    if: always()
+    steps:
+      - name: Require every job to pass
+        env:
+          TEST: ${{ needs.test.result }}
+          BASELINE: ${{ needs.baseline.result }}
+        run: test "$TEST" = success && test "$BASELINE" = success
