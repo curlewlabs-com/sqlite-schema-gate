@@ -198,6 +198,8 @@ not belong in a file that converges silently on every deploy.
 The fence does not read your schema, so the identity columns you name are a
 declaration. Hold them to the schema with a test that reads
 `pragma_index_list` and `pragma_table_info` for each seed table.
+`checkDataSeed` throws on a table named with no identity columns: with no key
+for `OR IGNORE` to conflict on, its rows are inserted again on every apply.
 
 ## The rules
 

@@ -188,6 +188,17 @@ describe("targets outside the seed tables", () => {
     ).toEqual(["not-insert-or-ignore", "not-insert-or-ignore"]);
   });
 
+  // A table with no primary key or UNIQUE column gives OR IGNORE nothing to
+  // conflict on, so its rows are inserted again on every apply. An empty
+  // identity list would skip every collision check and pass them.
+  it("refuses a seed table declared with no identity columns", () => {
+    expect(() =>
+      checkDataSeed("INSERT OR IGNORE INTO tags (name) VALUES ('x');", {
+        tags: [],
+      }),
+    ).toThrow(/identity columns[\s\S]*none given for: tags/);
+  });
+
   // The caller's table map is read as a map: a table named like an Object
   // member must not count as a seed table because the record happens to
   // inherit that name.

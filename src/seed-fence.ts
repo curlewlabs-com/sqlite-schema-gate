@@ -193,6 +193,19 @@ export function checkDataSeed(
   seedSql: string,
   tables: SeedTables,
 ): DataSeedFinding[] {
+  // A table with no identity columns has nothing OR IGNORE can conflict on,
+  // so every apply inserts its rows again: an empty list is not a table the
+  // fence can call idempotent, and passing its rows would say it was.
+  const keyless = Object.entries(tables)
+    .filter(([, columns]) => columns.length === 0)
+    .map(([table]) => table);
+  if (keyless.length > 0) {
+    throw new Error(
+      "sqlite-schema-gate: every seed table needs its identity columns (its " +
+        "primary key and each UNIQUE column); none given for: " +
+        keyless.join(", "),
+    );
+  }
   // A Map rather than the record itself, so a table named like an Object
   // prototype member (`constructor`) is not read as allowlisted.
   const identityByTable = new Map(
