@@ -159,37 +159,33 @@ function skipTemp(tokens: Token[], i: number): number {
 }
 
 // The tables a statement's `REFERENCES <table> ... ON DELETE CASCADE` keys
-// name, folded. After the parent and its column list, the ON DELETE and ON
-// UPDATE clauses are read in any order and number; a string or a quoted name
-// never reads as one. Any other clause ends the reading, so a cascade written
-// after MATCH or ON INSERT is not seen (README, Known issues).
+// name, folded. A key's clauses are not parsed one by one: SQLite accepts
+// MATCH, ON INSERT, ON UPDATE and ON DELETE in any order and number, followed
+// by other column constraints, and a reader that stopped at one it did not
+// know would drop a cascade written after it. Instead the key's extent runs
+// to the `,` or `)` that ends its column definition or table constraint, or
+// to the next REFERENCES, and its last ON DELETE decides, as a later clause of
+// a kind replaces an earlier one in SQLite. Nothing else in a column
+// definition or a table constraint holds the words ON DELETE, and a string or
+// a quoted name never reads as them. test/fk-grammar.test.ts holds every form
+// of the grammar against SQLite's own reading of it.
 function cascadeParentsIn(tokens: Token[]): string[] {
   const parents: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     if (!isWord(tokens[i], "REFERENCES")) continue;
     const parent = nameAt(tokens, i + 1, true);
     if (!parent) continue;
-    let k = i + 2;
-    if (tokens[k]?.text === "(") {
-      while (k < tokens.length && tokens[k]?.text !== ")") k++;
-      k++;
-    }
+    let depth = 0;
     let cascade = false;
-    while (
-      wordsAt(tokens, k, "ON", "DELETE") ||
-      wordsAt(tokens, k, "ON", "UPDATE")
-    ) {
-      const action = k + 2;
-      if (
-        isWord(tokens[k + 1], "DELETE") &&
-        isWord(tokens[action], "CASCADE")
-      ) {
-        cascade = true;
+    for (let k = i + 2; k < tokens.length; k++) {
+      const t = tokens[k] as Token;
+      if (t.text === "(") depth++;
+      if (t.text === ")") depth--;
+      if (depth < 0) break;
+      if (depth === 0 && (t.text === "," || isWord(t, "REFERENCES"))) break;
+      if (wordsAt(tokens, k, "ON", "DELETE")) {
+        cascade = isWord(tokens[k + 2], "CASCADE");
       }
-      // SET NULL, SET DEFAULT and NO ACTION are two words; the rest one.
-      k =
-        action +
-        (isWord(tokens[action], "SET") || isWord(tokens[action], "NO") ? 2 : 1);
     }
     if (cascade) parents.push(parent.name);
   }

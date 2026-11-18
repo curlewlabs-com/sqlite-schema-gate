@@ -269,12 +269,6 @@ written. A writer that re-attempts an insert on a hot path should guard its
 Each of these is a case a check gets wrong today. "Missed" means a real hazard
 passes; "false finding" means a safe shape is reported.
 
-Migration lint:
-
-- **Missed:** a `MATCH` or `ON INSERT` clause written before
-  `ON DELETE CASCADE` hides the cascade, as in
-  `REFERENCES p(id) MATCH SIMPLE ON DELETE CASCADE`.
-
 Table-layout lint:
 
 - **Missed:** the length `CHECK`, `ON DELETE` and `AUTOINCREMENT` patterns can
