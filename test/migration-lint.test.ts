@@ -60,6 +60,82 @@ describe("cascade-parent wipe", () => {
     expect(rules(migration, BEFORE)).toEqual(["cascade-parent-wipe"]);
   });
 
+  // The schema before the migration shows books' key as SET NULL, so only the
+  // migration's own CREATE TABLE says the rebuilt child cascades. Rebuilding
+  // the child that way, copying its rows in, and then rebuilding the parent
+  // empties the copy just as a cascade read from the schema would.
+  it("fires when the cascade key is created earlier in the same migration", () => {
+    const before = `
+      CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);
+      CREATE TABLE books (
+        id INTEGER PRIMARY KEY,
+        author_id INTEGER REFERENCES authors(id) ON DELETE SET NULL
+      );
+    `;
+    const migration = `
+      CREATE TABLE books_new (
+        id INTEGER PRIMARY KEY,
+        author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE
+      );
+      INSERT INTO books_new SELECT * FROM books;
+      DROP TABLE books;
+      ALTER TABLE books_new RENAME TO books;
+      CREATE TABLE authors_new (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);
+      INSERT INTO authors_new SELECT * FROM authors;
+      DROP TABLE authors;
+      ALTER TABLE authors_new RENAME TO authors;
+    `;
+    expect(rules(migration, before)).toEqual(["cascade-parent-wipe"]);
+  });
+
+  // ADD COLUMN may declare a foreign key too, and an UPDATE later in the
+  // migration can fill it before the parent is dropped.
+  it("fires when ADD COLUMN creates the cascade key", () => {
+    const before = `
+      CREATE TABLE authors (id INTEGER PRIMARY KEY);
+      CREATE TABLE books (id INTEGER PRIMARY KEY);
+    `;
+    const migration = `
+      ALTER TABLE books ADD COLUMN author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE;
+      UPDATE books SET author_id = 1;
+      DROP TABLE authors;
+    `;
+    expect(rules(migration, before)).toEqual(["cascade-parent-wipe"]);
+  });
+
+  // A string default may spell a foreign key, and an identifier may hold a
+  // single quote; neither is a key. Reading either as one would report a drop
+  // that cascades nothing.
+  it("does not read a cascade key out of a string or a quoted name", () => {
+    const before = `
+      CREATE TABLE authors (id INTEGER PRIMARY KEY);
+      CREATE TABLE notes (id INTEGER PRIMARY KEY);
+    `;
+    const migration = `
+      ALTER TABLE notes ADD COLUMN explanation TEXT
+        DEFAULT 'REFERENCES authors ON DELETE CASCADE';
+      DROP TABLE authors;
+    `;
+    expect(checkDataLoss(migration, before)).toEqual([]);
+    expect(
+      findCascadeParents(
+        `CREATE TABLE "it's" (x TEXT DEFAULT ' REFERENCES authors ON DELETE CASCADE');`,
+      ).size,
+    ).toBe(0);
+  });
+
+  // A key that does not exist yet cascades nothing, so a drop before the
+  // CREATE TABLE that declares it is not a wipe.
+  it("does not count a cascade key created after the drop", () => {
+    const before = `CREATE TABLE authors (id INTEGER PRIMARY KEY);`;
+    const migration = `
+      DROP TABLE authors;
+      CREATE TABLE authors (id INTEGER PRIMARY KEY);
+      CREATE TABLE books (author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE);
+    `;
+    expect(checkDataLoss(migration, before)).toEqual([]);
+  });
+
   // Most drops are of leaf tables. Firing on those would make the lint noise,
   // and a noisy lint gets switched off.
   it("stays silent when the dropped table has no cascading children", () => {

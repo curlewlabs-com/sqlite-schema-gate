@@ -13,7 +13,11 @@
 //   cascade-parent-wipe    Dropping a table that parents an ON DELETE CASCADE
 //                          foreign key deletes every child row. The parents
 //                          are read from the schema BEFORE the migration,
-//                          since the schema after it no longer shows the drop.
+//                          since the schema after it no longer shows the drop,
+//                          and from each CREATE TABLE and ALTER TABLE in the
+//                          migration as it is reached, since a child created
+//                          and filled earlier in the same migration loses its
+//                          rows just the same.
 //                          The usual table rebuild (create a copy, copy the
 //                          rows, drop the original, rename) does this whenever
 //                          foreign keys are enforced and cannot be switched
@@ -77,7 +81,12 @@
 //                                    cannot name a table created as `x`; such a migration fails
 //                                    when it runs rather than slipping past here.
 
-import { excerpt, keywordView, tokenizeStatements } from "./sql-text";
+import {
+  blankStringLiterals,
+  excerpt,
+  keywordView,
+  tokenizeStatements,
+} from "./sql-text";
 
 export type DataLossRule =
   | "cascade-parent-wipe"
@@ -168,9 +177,6 @@ function readIdentifierAt(
 // of these deletes its children's rows.
 export function findCascadeParents(schemaSql: string): Set<string> {
   const parents = new Set<string>();
-  // Statements, not raw text, so a REFERENCES ... ON DELETE CASCADE written in
-  // a comment cannot register a parent that does not exist.
-  const ddl = tokenizeStatements(schemaSql).join("; ");
   // The referenced table and its trailing ON clauses, skipping any column
   // list. The `\s*` sits INSIDE the optional column-list group so that, for a
   // key with no column list - `REFERENCES parent ON DELETE CASCADE` - the space
@@ -179,12 +185,19 @@ export function findCascadeParents(schemaSql: string): Set<string> {
     `REFERENCES\\s+(${IDENT_TOKEN})(?:\\s*\\([^)]*\\))?((?:\\s+ON\\s+(?:DELETE|UPDATE)\\s+(?:NO\\s+ACTION|SET\\s+(?:NULL|DEFAULT)|CASCADE|RESTRICT))*)`,
     "gi",
   );
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(ddl)) !== null) {
-    const table = m[1];
-    const clauses = m[2] ?? "";
-    if (table && /ON\s+DELETE\s+CASCADE/i.test(clauses)) {
-      parents.add(unquoteIdent(table));
+  // Statements, not raw text, so a REFERENCES ... ON DELETE CASCADE written in
+  // a comment cannot register a parent that does not exist; and string
+  // literals blanked, so neither can a `DEFAULT 'REFERENCES p ON DELETE
+  // CASCADE'`.
+  for (const statement of tokenizeStatements(schemaSql)) {
+    const ddl = blankStringLiterals(statement);
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(ddl)) !== null) {
+      const table = m[1];
+      const clauses = m[2] ?? "";
+      if (table && /ON\s+DELETE\s+CASCADE/i.test(clauses)) {
+        parents.add(unquoteIdent(table));
+      }
     }
   }
   return parents;
@@ -255,6 +268,15 @@ export function checkDataLoss(
           `value as a plain column the application writes, or treat this as a one-off ` +
           `for a person to sign off.`,
       });
+    }
+
+    // A cascade relationship this migration creates counts from the statement
+    // that creates it on: a rebuild that recreates a child with ON DELETE
+    // CASCADE, copies its rows in, and then rebuilds the parent wipes the
+    // copied rows, and the schema before the migration shows no such key.
+    // ALTER TABLE ... ADD COLUMN can declare one too.
+    if (COLUMN_DEF_CARRIER_RE.test(kw)) {
+      for (const parent of findCascadeParents(raw)) cascadeParents.add(parent);
     }
 
     if (RENAME_RE.test(kw)) {
