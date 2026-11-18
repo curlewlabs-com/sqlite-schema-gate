@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { env } from "cloudflare:test";
 import { checkDataSeed, type SeedTables } from "../src/index";
 
 // The fence is a whitelist over a file applied on every deploy, so the cases
@@ -135,16 +136,23 @@ describe("a row that collides with one the file already wrote", () => {
     ).toEqual([]);
   });
 
-  // The tail grammar reads a string with an escaped quote ('it''s') as two
-  // literals with no comma between them, so the row is reported rather than
-  // admitted: a false finding, never a missed one. The README's Limits say so;
-  // this pins the direction.
-  it("reports a string literal holding an escaped quote", () => {
+  // A string holding an escaped quote is one literal, as SQLite reads it, and
+  // its identity is its content with the quote undone.
+  it("reads a string literal holding an escaped quote as one value", () => {
     expect(
       rules(
-        "INSERT OR IGNORE INTO currencies (id, iso_code) VALUES (1, 'it''s');",
+        "INSERT OR IGNORE INTO currencies (id, iso_code) VALUES (1, 'it''s'), (2, 'it''s');",
       ),
-    ).toEqual(["non-literal-rows"]);
+    ).toEqual(["duplicate-authored-identity"]);
+  });
+
+  // Spacing is the formatter's choice; the grammar reads tokens.
+  it("accepts a column list and tuples written without spaces", () => {
+    expect(
+      rules(
+        "INSERT OR IGNORE INTO currencies(id,iso_code)VALUES(1,'x'),(2,'y');",
+      ),
+    ).toEqual([]);
   });
 
   // Same value, different form: comparing raw text would read these as
@@ -306,5 +314,215 @@ describe("evasions the whitelist has to survive", () => {
           (24, 'y');
       `),
     ).toEqual([]);
+  });
+});
+
+describe("identity as SQLite compares it", () => {
+  // Each case applies the seed rows to a D1 table declared as `ddl` says and
+  // counts what lands: a row OR IGNORE dropped is a collision. The fence,
+  // which reads only the file and the declared keys, must report exactly
+  // those, or, where a case says so, more.
+  const cases: {
+    what: string;
+    ddl: string;
+    columns: string[];
+    keys: SeedTables[string];
+    rows: string;
+    superset?: true;
+  }[] = [
+    {
+      what: "integers past 2^53 that share a double, in a REAL column",
+      ddl: "id INTEGER PRIMARY KEY, r REAL UNIQUE",
+      columns: ["id", "r"],
+      keys: ["id", "r"],
+      rows: "(1, 9007199254740993), (2, 9007199254740992)",
+    },
+    {
+      // Distinct in an INTEGER column; the fence, which does not read the
+      // column's type, calls them one. A false finding only.
+      what: "integers past 2^53 that share a double, in an INTEGER column",
+      ddl: "id INTEGER PRIMARY KEY",
+      columns: ["id"],
+      keys: ["id"],
+      rows: "(9007199254740993), (9007199254740992)",
+      superset: true,
+    },
+    {
+      what: "the least 64-bit integer and the same real, in a BLOB column",
+      ddl: "id INTEGER PRIMARY KEY, b BLOB UNIQUE",
+      columns: ["id", "b"],
+      keys: ["id", "b"],
+      rows: "(1, -9223372036854775808), (2, -9223372036854775808.0)",
+    },
+    {
+      what: "the same integer past 2^53 twice",
+      ddl: "id INTEGER PRIMARY KEY",
+      columns: ["id"],
+      keys: ["id"],
+      rows: "(9223372036854775807), (9223372036854775807)",
+    },
+    {
+      what: "an integer and the same real",
+      ddl: "id INTEGER PRIMARY KEY",
+      columns: ["id"],
+      keys: ["id"],
+      rows: "(1), (1.0)",
+    },
+    {
+      what: "a number and its text in an INTEGER column",
+      ddl: "id INTEGER PRIMARY KEY, n INTEGER UNIQUE",
+      columns: ["id", "n"],
+      keys: ["id", "n"],
+      rows: "(1, 7), (2, '7')",
+    },
+    {
+      what: "a number and its text in a TEXT column",
+      ddl: "id INTEGER PRIMARY KEY, code TEXT UNIQUE",
+      columns: ["id", "code"],
+      keys: ["id", "code"],
+      rows: "(1, 7), (2, '7')",
+    },
+    {
+      what: "text that differs only in case, under BINARY",
+      ddl: "id INTEGER PRIMARY KEY, code TEXT UNIQUE",
+      columns: ["id", "code"],
+      keys: ["id", "code"],
+      rows: "(1, 'USD'), (2, 'usd')",
+    },
+    {
+      what: "text that differs only in case, under NOCASE",
+      ddl: "id INTEGER PRIMARY KEY, code TEXT COLLATE NOCASE UNIQUE",
+      columns: ["id", "code"],
+      keys: ["id", { columns: ["code"], collate: { code: "NOCASE" } }],
+      rows: "(1, 'USD'), (2, 'usd')",
+    },
+    {
+      what: "text that differs only in trailing spaces, under RTRIM",
+      ddl: "id INTEGER PRIMARY KEY, code TEXT COLLATE RTRIM UNIQUE",
+      columns: ["id", "code"],
+      keys: ["id", { columns: ["code"], collate: { code: "RTRIM" } }],
+      rows: "(1, 'usd'), (2, 'usd  ')",
+    },
+    {
+      what: "rows of a composite UNIQUE that share one column",
+      ddl: "id INTEGER PRIMARY KEY, a INTEGER, b TEXT, UNIQUE (a, b)",
+      columns: ["id", "a", "b"],
+      keys: ["id", { columns: ["a", "b"] }],
+      rows: "(1, 1, 'x'), (2, 1, 'y'), (3, 2, 'x')",
+    },
+    {
+      what: "rows of a composite UNIQUE that share both columns",
+      ddl: "id INTEGER PRIMARY KEY, a INTEGER, b TEXT, UNIQUE (a, b)",
+      columns: ["id", "a", "b"],
+      keys: ["id", { columns: ["a", "b"] }],
+      rows: "(1, 1, 'x'), (2, 1, 'x')",
+    },
+    {
+      what: "a composite UNIQUE compared under NOCASE in one column",
+      ddl: "id INTEGER PRIMARY KEY, a INTEGER, b TEXT COLLATE NOCASE, UNIQUE (a, b)",
+      columns: ["id", "a", "b"],
+      keys: ["id", { columns: ["a", "b"], collate: { b: "NOCASE" } }],
+      rows: "(1, 1, 'x'), (2, 1, 'X')",
+    },
+    {
+      // How many digits a TEXT column keeps of a real depends on the SQLite
+      // release: this one keeps them all, so the pair stays apart, where one
+      // rendering 15 digits would collide them. The fence cannot know which
+      // it runs against, and reports such a real wherever it is.
+      what: "a real with more than 15 significant digits, in a TEXT column",
+      ddl: "id INTEGER PRIMARY KEY, code TEXT UNIQUE",
+      columns: ["id", "code"],
+      keys: ["id", "code"],
+      rows: "(1, 1.2345678901234567), (2, '1.23456789012346')",
+      superset: true,
+    },
+    {
+      what: "a real too large for a double, in a TEXT column",
+      ddl: "id INTEGER PRIMARY KEY, code TEXT UNIQUE",
+      columns: ["id", "code"],
+      keys: ["id", "code"],
+      rows: `(1, ${"9".repeat(400)}), (2, 'Inf')`,
+    },
+    {
+      // A TEXT column keeps '01' and '1' apart; the fence, which does not
+      // read the column's type, calls them one. A false finding only.
+      what: "numeric-looking text in a TEXT column",
+      ddl: "id INTEGER PRIMARY KEY, code TEXT UNIQUE",
+      columns: ["id", "code"],
+      keys: ["id", "code"],
+      rows: "(1, '01'), (2, '1')",
+      superset: true,
+    },
+  ];
+
+  for (const c of cases) {
+    it(c.what, async () => {
+      await env.DB.batch([
+        env.DB.prepare("DROP TABLE IF EXISTS t"),
+        env.DB.prepare(`CREATE TABLE t (${c.ddl})`),
+      ]);
+      const seed = `INSERT OR IGNORE INTO t (${c.columns.join(", ")}) VALUES ${c.rows};`;
+      await env.DB.prepare(seed).run();
+      const landed = await env.DB.prepare("SELECT count(*) AS n FROM t").first<{
+        n: number;
+      }>();
+      const authored = c.rows.split("), (").length;
+      const collides = landed!.n < authored;
+      const reported = checkDataSeed(seed, { t: c.keys }).length > 0;
+      if (c.superset) {
+        expect(collides).toBe(false);
+        expect(reported).toBe(true);
+      } else {
+        expect(reported).toBe(collides);
+      }
+    });
+  }
+});
+
+describe("declared keys", () => {
+  // A key object with no columns, or a collation for a column outside the
+  // key, is a declaration mistake; reading past it would check nothing.
+  it("refuses a key with no columns or a stray collation", () => {
+    expect(() => checkDataSeed("", { t: [{ columns: [] }] })).toThrow(
+      /needs its columns/,
+    );
+    expect(() =>
+      checkDataSeed("", { t: [{ columns: ["a"], collate: { b: "NOCASE" } }] }),
+    ).toThrow(/collation for b/);
+  });
+
+  // Two constraints on one column under different collations each hold
+  // their own values; a row is not a repeat of itself under the second.
+  it("keeps the claims of keys that differ only in collation apart", () => {
+    expect(
+      rules("INSERT OR IGNORE INTO t (id, code) VALUES (1, 'usd');", {
+        t: [
+          "id",
+          { columns: ["code"], collate: { code: "NOCASE" } },
+          { columns: ["code"], collate: { code: "RTRIM" } },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  // A real that a TEXT column would render with fewer digits than it was
+  // written with is reported however it is spelled.
+  it("reports a real with more than 15 significant digits, not one with 15", () => {
+    const one = (v: string) =>
+      rules(`INSERT OR IGNORE INTO t (id) VALUES (${v});`, { t: ["id"] });
+    expect(one("1.2345678901234567")).toEqual(["duplicate-authored-identity"]);
+    expect(one("123456789012345.0000")).toEqual([]);
+    expect(one("-9223372036854775808")).toEqual([]);
+    expect(one("9223372036854775807")).toEqual([]);
+    expect(one("9223372036854775808")).toEqual(["duplicate-authored-identity"]);
+  });
+
+  // NULL in any column of a composite key means the key never conflicts.
+  it("fires on NULL in a column of a composite key", () => {
+    expect(
+      rules("INSERT OR IGNORE INTO t (id, a, b) VALUES (1, 1, NULL);", {
+        t: ["id", { columns: ["a", "b"] }],
+      }),
+    ).toEqual(["duplicate-authored-identity"]);
   });
 });
