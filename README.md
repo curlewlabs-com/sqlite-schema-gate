@@ -269,6 +269,12 @@ Migration lint:
   string literals included, so `DELETE FROM t RETURNING 'WHERE'` passes.
 - **Missed:** a `MATCH` clause before `ON DELETE CASCADE`
   (`REFERENCES p(id) MATCH SIMPLE ON DELETE CASCADE`) hides the cascade.
+- **Missed:** a quoted name written with no space after its keyword
+  (`DROP TABLE"t"`, `DELETE FROM"t"`, `ALTER TABLE"t" RENAME TO`,
+  `REFERENCES"t"`). SQLite accepts these, and the lint does not see them.
+- **Missed, or a false finding:** a bare name holding `$` (`p$archive`) is read
+  only up to the `$`, and a backtick-quoted parent whose name holds an escaped
+  backtick is not read as a parent.
 - **False finding:** `RENAME TO` inside a string literal of an `ALTER TABLE`
   is read as a rename, and a rename alias is never retired, so a later drop of
   that name is reported as a cascade wipe.

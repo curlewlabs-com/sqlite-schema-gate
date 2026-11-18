@@ -93,6 +93,22 @@ describe("readSchema", () => {
     expect(snapshot.indexSql.map((r) => r.name)).toContain("idx_books_author");
   });
 
+  // The snapshot type promises `to` may be null; a caller reading it as a
+  // string would typecheck and then fail on exactly this form.
+  it("reports a key that names no parent column with a null `to`", async () => {
+    await applySchema(`
+      CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+      CREATE TABLE books (
+        id INTEGER PRIMARY KEY,
+        author_id INTEGER REFERENCES authors ON DELETE CASCADE
+      ) STRICT
+    `);
+    const snapshot = await readSchema(env.DB);
+    expect(snapshot.foreignKeys.get("books")).toMatchObject([
+      { table: "authors", from: "author_id", to: null },
+    ]);
+  });
+
   // An empty schema is a normal call, and D1 refuses an empty batch.
   it("reads a schema with no tables", async () => {
     const snapshot = await readSchema(env.DB);

@@ -22,14 +22,14 @@ export interface ColumnInfo {
 }
 
 // One row of pragma_foreign_key_list. A multi-column key is several rows
-// sharing `id`, ordered by `seq`. `to` is empty when the key names no parent
+// sharing `id`, ordered by `seq`. `to` is null when the key names no parent
 // column, which SQLite resolves to the parent's primary key.
 export interface ForeignKey {
   id: number;
   seq: number;
   table: string;
   from: string;
-  to: string;
+  to: string | null;
   on_delete: string;
   on_update: string;
 }
