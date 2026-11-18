@@ -69,7 +69,7 @@ The package is `@curlewlabs-com/sqlite-schema-gate`. It is not on the npm
 registry: install it from the GitHub release tarball, with an exact pin:
 
 ```sh
-bun add https://github.com/curlewlabs-com/sqlite-schema-gate/releases/download/v0.1.1/curlewlabs-com-sqlite-schema-gate-0.1.1.tgz
+bun add https://github.com/curlewlabs-com/sqlite-schema-gate/releases/download/v0.2.0/curlewlabs-com-sqlite-schema-gate-0.2.0.tgz
 ```
 
 The package ships TypeScript sources; Vitest, Wrangler and Bun compile them.
