@@ -261,7 +261,10 @@ export function checkDataLoss(
       // Offsets from `raw`, never a fallback of 0: reading from 0 would take
       // ALTER itself as the table name and drop the alias without a word.
       const alter = RENAME_RE.exec(raw);
-      const renameTo = /\s+RENAME\s+TO\s+/i.exec(raw);
+      // One whitespace character on each side, not a run: an unanchored leading
+      // run makes the search quadratic in a long stretch of spaces, and the
+      // identifier reader skips whitespace either way.
+      const renameTo = /\sRENAME\s+TO\s/i.exec(raw);
       if (alter && renameTo) {
         const from = readIdentifierAt(raw, alter[0].length);
         const to = readIdentifierAt(raw, renameTo.index + renameTo[0].length);
