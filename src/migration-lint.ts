@@ -17,7 +17,8 @@
 //                          and from each CREATE TABLE and ALTER TABLE in the
 //                          migration as it is reached, since a child created
 //                          and filled earlier in the same migration loses its
-//                          rows just the same.
+//                          rows just the same. A key is never retired: see
+//                          "Dropped children" below.
 //                          The usual table rebuild (create a copy, copy the
 //                          rows, drop the original, rename) does this whenever
 //                          foreign keys are enforced and cannot be switched
@@ -44,12 +45,22 @@
 // should wave through.
 //
 // What the parser reads, and what it deliberately does not:
-//   Leading/trailing whitespace .... handled - readComponentAt skips it, keywordView trims.
-//   Line and block comments ........ handled - tokenizeStatements strips each to a token boundary.
-//   String-content false positives . handled - keywordView blanks '...' literals before any
-//                                    keyword test, so DEFAULT 'DROP TABLE x' is inert.
-//   Quoted and qualified names ..... handled - "double", `backtick`, [bracket], and
-//                                    schema-qualified main.t all resolve to the object.
+//   Tokens ......................... every statement is read as sqlTokens (sql-text.ts) cuts it,
+//                                    as SQLite's tokenizer would, so keywords match whatever
+//                                    whitespace, comments or quotes surround them, and a keyword
+//                                    inside a string or a quoted name is never read as one:
+//                                    DEFAULT 'DROP TABLE x' and "x AS (" are inert.
+//   Quoted and qualified names ..... handled - "double", `backtick`, [bracket] and bare names
+//                                    holding `$` all resolve to the object, compared with ASCII
+//                                    case folded as SQLite compares them; a destructive target
+//                                    may be schema-qualified (main.t). A single-quoted name is
+//                                    read where only a name can stand (REFERENCES 'p').
+//   Dropped children ............... accepted - a key still counts after the table holding it is
+//                                    dropped, so dropping every cascading child and then the
+//                                    parent is reported. Retiring a key exactly would mean
+//                                    following savepoints and rollbacks and which schema each
+//                                    name resolves to, and a key retired wrongly lets a real wipe
+//                                    pass. A false finding, never a missed one.
 //   Minified one-liners ............ handled - the split is by character on `;`, not by line.
 //   Multi-line statements .......... handled - same; a foreign key split across lines matches.
 //   Statement classes .............. row loss: DROP TABLE and DELETE. Change in meaning:
@@ -73,19 +84,17 @@
 //                                    `;`s, but the first fragment still starts with CREATE
 //                                    TRIGGER, so the trigger is still found; later fragments can
 //                                    only add findings to it.
-//   Quoted name containing `AS (` .. accepted - keywordView blanks only single-quoted literals,
-//                                    so a double-quoted identifier containing `AS (` in a CREATE
-//                                    or ALTER TABLE reads as a generated column. A false finding,
-//                                    never a missed one.
 //   Bracketed whitespace ........... out of scope - SQLite reads `[ x ]` as the name ` x `, which
 //                                    cannot name a table created as `x`; such a migration fails
 //                                    when it runs rather than slipping past here.
 
 import {
-  blankStringLiterals,
   excerpt,
-  keywordView,
+  foldName,
+  isWord,
+  sqlTokens,
   tokenizeStatements,
+  type Token,
 } from "./sql-text";
 
 export type DataLossRule =
@@ -100,127 +109,167 @@ export interface DataLossFinding {
   message: string;
 }
 
-// A SQLite identifier: bare, or quoted "double" / `backtick` / [bracket].
-const IDENT_TOKEN = '(?:"(?:[^"]|"")*"|`[^`]*`|\\[[^\\]]*\\]|\\w+)';
-
-function unquoteIdent(s: string): string {
-  return s.replace(/["'`[\]]/g, "").toLowerCase();
+// A name as the lint compares it, folded, and as written, for a message.
+interface Name {
+  name: string;
+  display: string;
 }
 
-// Read ONE identifier component at or after `start`, skipping leading
-// whitespace: a bare word, or one of the quoted forms SQLite accepts, where a
-// doubled closing quote inside "" or `` is a literal quote. Returns the
-// unquoted component and the index past it, or null when there is none (an
-// unterminated quote, or a token that is not an identifier, such as a
-// single-quoted string).
-function readComponentAt(
-  s: string,
-  start: number,
-): { ident: string; end: number } | null {
-  let i = start;
-  while (i < s.length && /\s/.test(s[i] as string)) i++;
-  if (i >= s.length) return null;
-  const open = s[i];
-  const close =
-    open === "[" ? "]" : open === '"' ? '"' : open === "`" ? "`" : null;
-  if (close) {
-    i++;
-    let out = "";
-    while (i < s.length) {
-      if (s[i] === close) {
-        // A doubled closer (not for []) is an escaped quote and stays in the name.
-        if (close !== "]" && s[i + 1] === close) {
-          out += close;
-          i += 2;
-          continue;
-        }
-        i++;
-        return out.length > 0 ? { ident: out, end: i } : null;
-      }
-      out += s[i];
-      i++;
+// One identifier at `tokens[i]`: a bare word or a quoted name, never empty.
+// `allowString` admits a single-quoted string too, which SQLite reads as a
+// name where only a name can stand (`REFERENCES 'p'`, `CREATE TABLE 'c'`).
+function nameAt(tokens: Token[], i: number, allowString = false): Name | null {
+  const t = tokens[i];
+  if (!t) return null;
+  const ok =
+    t.kind === "word" ||
+    t.kind === "name" ||
+    (allowString && t.kind === "string");
+  if (!ok || t.value === "") return null;
+  return { name: foldName(t.value), display: t.value };
+}
+
+// `[schema.]table` at `tokens[i]`, resolved to the table - the object
+// touched, not the `main` qualifier - or null when it does not parse: a
+// missing or malformed name, a dangling `.`, or more than two parts. A
+// destructive statement whose target is null is reported, never skipped.
+function tableRefAt(
+  tokens: Token[],
+  i: number,
+  allowString = false,
+): { ref: Name; end: number } | null {
+  const first = nameAt(tokens, i, allowString);
+  if (!first) return null;
+  if (tokens[i + 1]?.text !== ".") return { ref: first, end: i + 1 };
+  const second = nameAt(tokens, i + 2, allowString);
+  if (!second || tokens[i + 3]?.text === ".") return null;
+  return { ref: second, end: i + 3 };
+}
+
+// The words at `tokens[i..]` match `words` in order.
+function wordsAt(tokens: Token[], i: number, ...words: string[]): boolean {
+  return words.every((w, k) => isWord(tokens[i + k], w));
+}
+
+// Past an optional `TEMP` / `TEMPORARY` at `tokens[i]`.
+function skipTemp(tokens: Token[], i: number): number {
+  return isWord(tokens[i], "TEMP") || isWord(tokens[i], "TEMPORARY")
+    ? i + 1
+    : i;
+}
+
+// The tables a statement's `REFERENCES <table> ... ON DELETE CASCADE` keys
+// name, folded. After the parent and its column list, the ON DELETE and ON
+// UPDATE clauses are read in any order and number; a string or a quoted name
+// never reads as one. Any other clause ends the reading, so a cascade written
+// after MATCH or ON INSERT is not seen (README, Known issues).
+function cascadeParentsIn(tokens: Token[]): string[] {
+  const parents: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (!isWord(tokens[i], "REFERENCES")) continue;
+    const parent = nameAt(tokens, i + 1, true);
+    if (!parent) continue;
+    let k = i + 2;
+    if (tokens[k]?.text === "(") {
+      while (k < tokens.length && tokens[k]?.text !== ")") k++;
+      k++;
     }
-    // Unterminated quote: an opaque target, which the caller reports.
-    return null;
-  }
-  // A bare SQL identifier starts with a letter or underscore, never a digit.
-  const m = /^[A-Za-z_]\w*/.exec(s.slice(i));
-  return m ? { ident: m[0], end: i + m[0].length } : null;
-}
-
-// Resolve a possibly schema-qualified reference (`main.t`) to its LAST
-// component - the object actually touched, not the `main` qualifier. A
-// trailing `.` with nothing after it is malformed. null means the target did
-// not parse and the caller must report it: a plain \w+ match here would
-// silently read only the start of a quoted name containing a space, and the
-// schema instead of the table of a qualified one.
-function readIdentifierAt(
-  s: string,
-  start: number,
-): { ident: string; end: number } | null {
-  let comp = readComponentAt(s, start);
-  if (!comp) return null;
-  let i = comp.end;
-  for (;;) {
-    let k = i;
-    while (k < s.length && /\s/.test(s[k] as string)) k++;
-    if (s[k] !== ".") break;
-    comp = readComponentAt(s, k + 1);
-    if (!comp) return null;
-    i = comp.end;
-  }
-  return { ident: comp.ident, end: i };
-}
-
-// The tables named as the target of a `REFERENCES <table> ... ON DELETE
-// CASCADE` foreign key in `schemaSql`, lowercased and unquoted. Dropping one
-// of these deletes its children's rows.
-export function findCascadeParents(schemaSql: string): Set<string> {
-  const parents = new Set<string>();
-  // The referenced table and its trailing ON clauses, skipping any column
-  // list. The `\s*` sits INSIDE the optional column-list group so that, for a
-  // key with no column list - `REFERENCES parent ON DELETE CASCADE` - the space
-  // before `ON` is not consumed, which would leave the ON-clause group empty.
-  const re = new RegExp(
-    `REFERENCES\\s+(${IDENT_TOKEN})(?:\\s*\\([^)]*\\))?((?:\\s+ON\\s+(?:DELETE|UPDATE)\\s+(?:NO\\s+ACTION|SET\\s+(?:NULL|DEFAULT)|CASCADE|RESTRICT))*)`,
-    "gi",
-  );
-  // Statements, not raw text, so a REFERENCES ... ON DELETE CASCADE written in
-  // a comment cannot register a parent that does not exist; and string
-  // literals blanked, so neither can a `DEFAULT 'REFERENCES p ON DELETE
-  // CASCADE'`.
-  for (const statement of tokenizeStatements(schemaSql)) {
-    const ddl = blankStringLiterals(statement);
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(ddl)) !== null) {
-      const table = m[1];
-      const clauses = m[2] ?? "";
-      if (table && /ON\s+DELETE\s+CASCADE/i.test(clauses)) {
-        parents.add(unquoteIdent(table));
+    let cascade = false;
+    while (
+      wordsAt(tokens, k, "ON", "DELETE") ||
+      wordsAt(tokens, k, "ON", "UPDATE")
+    ) {
+      const action = k + 2;
+      if (
+        isWord(tokens[k + 1], "DELETE") &&
+        isWord(tokens[action], "CASCADE")
+      ) {
+        cascade = true;
       }
+      // SET NULL, SET DEFAULT and NO ACTION are two words; the rest one.
+      k =
+        action +
+        (isWord(tokens[action], "SET") || isWord(tokens[action], "NO") ? 2 : 1);
     }
+    if (cascade) parents.push(parent.name);
   }
   return parents;
 }
 
-const DROP_TABLE_RE = /^DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?/i;
-const RENAME_RE = /^ALTER\s+TABLE\s+/i;
-// A DELETE may follow one or more CTEs. Anchoring on `^DELETE` alone would let
-// `WITH doomed AS (...) DELETE FROM t` past every check below.
-const DELETE_RE = /(?:^|\)\s*)DELETE\s+FROM\s+/i;
+// The tables named as the target of a `REFERENCES <table> ... ON DELETE
+// CASCADE` foreign key in `schemaSql`, folded and unquoted. Dropping one of
+// these deletes its children's rows.
+export function findCascadeParents(schemaSql: string): Set<string> {
+  const parents = new Set<string>();
+  for (const raw of tokenizeStatements(schemaSql)) {
+    const tokens = sqlTokens(raw);
+    if (!isColumnDefCarrier(tokens)) continue;
+    for (const parent of cascadeParentsIn(tokens)) parents.add(parent);
+  }
+  return parents;
+}
+
 // No target is parsed: the statement class alone is the finding, which leaves
 // no unparseable case to slip through.
-const TRIGGER_RE = /^(?:CREATE\s+(?:TEMP(?:ORARY)?\s+)?|DROP\s+)TRIGGER\b/i;
+function isTrigger(tokens: Token[]): boolean {
+  if (isWord(tokens[0], "DROP")) return isWord(tokens[1], "TRIGGER");
+  return (
+    isWord(tokens[0], "CREATE") &&
+    isWord(tokens[skipTemp(tokens, 1)], "TRIGGER")
+  );
+}
+
 // The only statements whose grammar can carry a column definition, and so a
-// generated column. Scoping the `AS (` scan to them keeps a CTE's
-// `WITH x AS (SELECT ...)` and CAST's `AS type` from reading as one.
-const COLUMN_DEF_CARRIER_RE =
-  /^(?:CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE|ALTER\s+TABLE)\b/i;
+// generated column or a foreign key. Scoping the `AS (` scan to them keeps a
+// CTE's `WITH x AS (SELECT ...)` and CAST's `AS type` from reading as one.
+function isColumnDefCarrier(tokens: Token[]): boolean {
+  if (isWord(tokens[0], "ALTER")) return isWord(tokens[1], "TABLE");
+  return (
+    isWord(tokens[0], "CREATE") && isWord(tokens[skipTemp(tokens, 1)], "TABLE")
+  );
+}
+
 // Inside a carrier statement, `AS (` appears only in the generated-column
 // grammar `[GENERATED ALWAYS] AS (expr)`: CAST's AS takes a bare type name,
-// table constraints carry no AS, and a column definition or CHECK cannot hold
-// a subquery. One pattern covers the explicit form and the bare shorthand.
-const GENERATED_COLUMN_RE = /\bAS\s*\(/i;
+// table constraints carry no AS, a column definition or CHECK cannot hold a
+// subquery, and `CREATE TABLE ... AS SELECT` is followed by SELECT. One test
+// covers the explicit form and the bare shorthand.
+function declaresGeneratedColumn(tokens: Token[]): boolean {
+  return tokens.some((t, i) => isWord(t, "AS") && tokens[i + 1]?.text === "(");
+}
+
+// The DELETE FROM of a statement, at the top level: at its start, or after
+// the `)` that closes its last CTE. Inside parentheses it would be another
+// statement's text, which SQLite does not allow.
+function deleteFromAt(tokens: Token[]): number {
+  let depth = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i] as Token;
+    if (t.text === "(") depth++;
+    else if (t.text === ")") depth--;
+    else if (
+      depth === 0 &&
+      (i === 0 || tokens[i - 1]?.text === ")") &&
+      wordsAt(tokens, i, "DELETE", "FROM")
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// A WHERE of the DELETE's own: after its target, outside every parenthesis,
+// so neither a CTE's WHERE before it nor a subquery's in RETURNING counts.
+function hasTopLevelWhere(tokens: Token[], from: number): boolean {
+  let depth = 0;
+  for (let i = from; i < tokens.length; i++) {
+    const t = tokens[i] as Token;
+    if (t.text === "(") depth++;
+    else if (t.text === ")") depth--;
+    else if (depth === 0 && isWord(t, "WHERE")) return true;
+  }
+  return false;
+}
 
 // Every statement in `migrationSql` that destroys rows or changes what writes
 // mean, read against `schemaBeforeSql`, the schema the migration runs on. An
@@ -232,14 +281,15 @@ export function checkDataLoss(
   const findings: DataLossFinding[] = [];
   const cascadeParents = findCascadeParents(schemaBeforeSql);
 
-  // In order, so a rename is seen before a later drop of the renamed table.
-  // ALTER TABLE ... RENAME rewrites each child's stored foreign key to follow
-  // the new name, so renaming a cascade parent aside and dropping it under the
-  // new name cascades exactly as dropping it directly would.
+  // In order, so a rename is seen before a later drop of the renamed table,
+  // and a key counts from the statement that declares it on. ALTER TABLE ...
+  // RENAME rewrites each child's stored foreign key to follow the new name, so
+  // renaming a cascade parent aside and dropping it under the new name
+  // cascades exactly as dropping it directly would.
   for (const raw of tokenizeStatements(migrationSql)) {
-    const kw = keywordView(raw);
+    const tokens = sqlTokens(raw);
 
-    if (TRIGGER_RE.test(kw)) {
+    if (isTrigger(tokens)) {
       findings.push({
         rule: "trigger-semantics",
         message:
@@ -253,53 +303,49 @@ export function checkDataLoss(
       continue;
     }
 
-    // No `continue` after a generated-column finding: a pathological ALTER that
-    // matches here AND renames a table still owes the rename tracking below,
-    // so a later drop of the renamed cascade parent is not missed.
-    if (COLUMN_DEF_CARRIER_RE.test(kw) && GENERATED_COLUMN_RE.test(kw)) {
-      findings.push({
-        rule: "generated-column-semantics",
-        message:
-          `${excerpt(raw)} declares a generated column ([GENERATED ALWAYS] AS (expr)). ` +
-          `A generated column silently changes what a stored row means - writes from ` +
-          `code already deployed keep succeeding while the derived value gives them new ` +
-          `meaning - and the expected schema carries the same column, so a schema ` +
-          `comparison passes across exactly the change that altered meaning. Store the ` +
-          `value as a plain column the application writes, or treat this as a one-off ` +
-          `for a person to sign off.`,
-      });
+    if (isColumnDefCarrier(tokens)) {
+      // No `continue` after a generated-column finding: a pathological ALTER
+      // that matches here AND renames a table still owes the rename tracking
+      // below, so a later drop of the renamed cascade parent is not missed.
+      if (declaresGeneratedColumn(tokens)) {
+        findings.push({
+          rule: "generated-column-semantics",
+          message:
+            `${excerpt(raw)} declares a generated column ([GENERATED ALWAYS] AS (expr)). ` +
+            `A generated column silently changes what a stored row means - writes from ` +
+            `code already deployed keep succeeding while the derived value gives them new ` +
+            `meaning - and the expected schema carries the same column, so a schema ` +
+            `comparison passes across exactly the change that altered meaning. Store the ` +
+            `value as a plain column the application writes, or treat this as a one-off ` +
+            `for a person to sign off.`,
+        });
+      }
+      // A cascade relationship this migration creates counts from the
+      // statement that creates it on: a rebuild that recreates a child with ON
+      // DELETE CASCADE, copies its rows in, and then rebuilds the parent wipes
+      // the copied rows, and the schema before the migration shows no such
+      // key. ALTER TABLE ... ADD COLUMN can declare one too.
+      for (const parent of cascadeParentsIn(tokens)) cascadeParents.add(parent);
     }
 
-    // A cascade relationship this migration creates counts from the statement
-    // that creates it on: a rebuild that recreates a child with ON DELETE
-    // CASCADE, copies its rows in, and then rebuilds the parent wipes the
-    // copied rows, and the schema before the migration shows no such key.
-    // ALTER TABLE ... ADD COLUMN can declare one too.
-    if (COLUMN_DEF_CARRIER_RE.test(kw)) {
-      for (const parent of findCascadeParents(raw)) cascadeParents.add(parent);
-    }
-
-    if (RENAME_RE.test(kw)) {
-      // Offsets from `raw`, never a fallback of 0: reading from 0 would take
-      // ALTER itself as the table name and drop the alias without a word.
-      const alter = RENAME_RE.exec(raw);
-      // One whitespace character on each side, not a run: an unanchored leading
-      // run makes the search quadratic in a long stretch of spaces, and the
-      // identifier reader skips whitespace either way.
-      const renameTo = /\sRENAME\s+TO\s/i.exec(raw);
-      if (alter && renameTo) {
-        const from = readIdentifierAt(raw, alter[0].length);
-        const to = readIdentifierAt(raw, renameTo.index + renameTo[0].length);
-        if (from && to && cascadeParents.has(unquoteIdent(from.ident))) {
-          cascadeParents.add(unquoteIdent(to.ident));
+    if (isWord(tokens[0], "ALTER")) {
+      const table = tableRefAt(tokens, 2, true);
+      const at = table ? table.end : -1;
+      if (table && wordsAt(tokens, at, "RENAME", "TO")) {
+        const to = nameAt(tokens, at + 2, true);
+        // The old name stays a parent too: with PRAGMA legacy_alter_table on
+        // and foreign keys off, SQLite does not rewrite the children, which
+        // then name whatever table takes the old name next.
+        if (to && cascadeParents.has(table.ref.name)) {
+          cascadeParents.add(to.name);
         }
       }
       continue;
     }
 
-    if (DROP_TABLE_RE.test(kw)) {
-      const m = DROP_TABLE_RE.exec(raw);
-      const target = m ? readIdentifierAt(raw, m[0].length) : null;
+    if (wordsAt(tokens, 0, "DROP", "TABLE")) {
+      const at = wordsAt(tokens, 2, "IF", "EXISTS") ? 4 : 2;
+      const target = tableRefAt(tokens, at);
       if (!target) {
         findings.push({
           rule: "unparseable-target",
@@ -310,12 +356,12 @@ export function checkDataLoss(
         });
         continue;
       }
-      const name = unquoteIdent(target.ident);
-      if (cascadeParents.has(name)) {
+      const { ref } = target;
+      if (cascadeParents.has(ref.name)) {
         findings.push({
           rule: "cascade-parent-wipe",
           message:
-            `"${target.ident}" parents an ON DELETE CASCADE foreign key; dropping it deletes ` +
+            `"${ref.display}" parents an ON DELETE CASCADE foreign key; dropping it deletes ` +
             `every child row, and PRAGMA defer_foreign_keys does not prevent that - it ` +
             `defers constraint checks, not cascade actions. The schema after the migration ` +
             `still looks as intended, so a schema comparison will not notice the rows are ` +
@@ -326,15 +372,9 @@ export function checkDataLoss(
       continue;
     }
 
-    const del = DELETE_RE.exec(kw);
-    if (del) {
-      // The target is found again in `raw`: blanking a literal in the keyword
-      // view changes offsets after it, so an offset from one is not one in the
-      // other.
-      const rawDel = DELETE_RE.exec(raw);
-      const target = rawDel
-        ? readIdentifierAt(raw, rawDel.index + rawDel[0].length)
-        : null;
+    const del = deleteFromAt(tokens);
+    if (del !== -1) {
+      const target = tableRefAt(tokens, del + 2);
       if (!target) {
         findings.push({
           rule: "unparseable-target",
@@ -349,12 +389,11 @@ export function checkDataLoss(
       // own WHERE, so testing the whole statement would read
       // `WITH x AS (SELECT ... WHERE ...) DELETE FROM t` as scoped when the
       // DELETE itself empties the table.
-      const afterTarget = raw.slice(target.end);
-      if (!/\bWHERE\b/i.test(afterTarget)) {
+      if (!hasTopLevelWhere(tokens, target.end)) {
         findings.push({
           rule: "unscoped-delete",
           message:
-            `${excerpt(raw)} deletes every row in "${target.ident}" - it carries no WHERE. ` +
+            `${excerpt(raw)} deletes every row in "${target.ref.display}" - it carries no WHERE. ` +
             `A forward migration should preserve rows by default. Scope the DELETE, or ` +
             `treat this as a one-off destructive migration for a person to sign off.`,
         });
