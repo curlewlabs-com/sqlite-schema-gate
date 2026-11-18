@@ -169,11 +169,14 @@ reaches a person.
 ```ts
 // check-seed.ts: bun check-seed.ts <seed.sql>
 import { readFileSync } from "node:fs";
-import { checkDataSeed } from "@curlewlabs-com/sqlite-schema-gate";
+import {
+  checkDataSeed,
+  type SeedTables,
+} from "@curlewlabs-com/sqlite-schema-gate";
 
 // Each seed table and the columns SQLite treats as its identity: its primary
 // key and every UNIQUE column.
-const SEED_TABLES = {
+const SEED_TABLES: SeedTables = {
   currencies: ["id", "iso_code"],
   tax_rates: ["id", "starts_at"],
 };
@@ -196,11 +199,35 @@ conflict. Name only tables where appending a row is inert for everything that
 already read the table. A table whose rows decide behavior does not belong in a
 file that converges silently on every deploy.
 
-The fence does not read your schema, so the identity columns you name are a
-declaration. Hold them to the schema with a test that reads
-`pragma_index_list` and `pragma_table_info` for each seed table.
-`checkDataSeed` throws on a table named with no identity columns: with no key
-for `OR IGNORE` to conflict on, its rows are inserted again on every apply.
+Each entry in a table's list is one key its rows are unique on. A column's
+name is a single-column key compared under SQLite's default `BINARY`
+collation: the primary key, or a `UNIQUE` column. A composite `UNIQUE (a, b)`,
+or a key column declared with another collation, takes the object form:
+
+```ts
+const SEED_TABLES: SeedTables = {
+  currencies: [
+    "id",
+    { columns: ["iso_code"], collate: { iso_code: "NOCASE" } },
+  ],
+  tax_rates: ["id", { columns: ["region", "starts_at"] }],
+};
+```
+
+Values compare as SQLite's uniqueness compares them: numbers by value, and
+strings under the key column's collation. A number that is not an integer
+within 64 bits, written with more than 15 significant digits or too large for
+a double, is reported: a `TEXT` column can render such a value as the text of
+another (with 15 digits in some SQLite releases, or as `Inf`), so whether it
+repeats one depends on the column's type. Write it with at most 15 significant
+digits, or as a string.
+
+The fence does not read your schema, so the keys you name are a declaration.
+Hold them to the schema with a test that reads `pragma_index_list`,
+`pragma_index_xinfo` and `pragma_table_info` for each seed table.
+`checkDataSeed` throws on a table named with no keys, or a key with no columns:
+with nothing for `OR IGNORE` to conflict on, its rows are inserted again on
+every apply.
 
 ## The rules
 
@@ -256,8 +283,14 @@ written. A writer that re-attempts an insert on a hot path should guard its
   does not rewrite the children. A `DROP TABLE` or `DELETE` whose target is a
   single-quoted string is reported as unparseable.
 - **The seed fence admits a bare table name only.** A quoted or
-  schema-qualified table (`"t"`, `main.t`) is reported, and so is a string
-  holding an escaped quote (`'it''s'`), which the fence reads as two literals.
+  schema-qualified table (`"t"`, `main.t`) is reported.
+- **The seed fence does not read column types.** A string that reads as a
+  number is compared as that number, which is how SQLite's affinity compares
+  `1` and `'1'` in an `INTEGER`, `REAL`, `NUMERIC` or `TEXT` column. A
+  `TEXT` column keeps `'01'` and `'1'` apart, a `BLOB` or untyped one keeps
+  `1` and `'1'` apart, and an `INTEGER` one keeps apart two integers past
+  2^53 that a `REAL` column would round to one value. The fence reports each
+  such pair as one row: a false finding, never a missed one.
 - **An allowlist entry is keyed by rule, table and the fields it names**, not by
   the relationship it was written about. An entry for a foreign key column keeps
   suppressing its finding after the key is pointed at another parent, so
@@ -289,15 +322,6 @@ Table-layout lint:
 - **False finding:** `integer-pk-needs-autoincrement-on-fk-target` reports an
   `INTEGER PRIMARY KEY` of a `WITHOUT ROWID` table, or one declared `DESC`,
   neither of which is a rowid alias.
-
-Seed fence:
-
-- **Missed:** identity comparison ignores type affinity and collation: `1` and
-  `'1'` in an `INTEGER` column, or `'USD'` and `'usd'` under `COLLATE NOCASE`,
-  are read as different rows.
-- **False finding:** identity columns are compared one at a time, so the rows
-  of a composite `UNIQUE (a, b)` that share one column are reported; and
-  integers beyond 2^53 are compared after rounding.
 
 ## License
 
