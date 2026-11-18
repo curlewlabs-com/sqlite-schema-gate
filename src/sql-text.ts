@@ -1,6 +1,7 @@
 // Reading SQL text: splitting it into statements, cutting a statement into
-// tokens, and the keyword view the seed fence matches against. Both text
-// lints read SQL through these, so there is one tokenizer to get right.
+// tokens, and comparing keywords and names as SQLite does. Every check that
+// reads SQL text reads it through these, so there is one tokenizer to get
+// right.
 
 // One token of SQL text, as SQLite's own tokenizer (tokenize.c) cuts it.
 //
@@ -231,26 +232,23 @@ export function sqlTokens(statement: string): Token[] {
   return lex(statement).flatMap((l) => (l.token ? [l.token] : []));
 }
 
-// A statement as the keyword tests see it: single-quoted literals blanked and
-// whitespace collapsed, so `DEFAULT 'DROP TABLE x'` cannot read as a drop.
-// Identifiers are always extracted from the raw text, which keeps them; this
-// view is for deciding what kind of statement it is.
-export function keywordView(raw: string): string {
-  return raw
-    .replace(/'[^']*'/g, "''")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toUpperCase();
+// SQLite folds only ASCII letters when it compares keywords, type names and
+// identifiers. JavaScript's toUpperCase and toLowerCase fold more: a dotless
+// i (U+0131) in a name would become the I of a keyword, where to SQLite the
+// word is still a name.
+export function upperAscii(s: string): string {
+  return s.replace(/[a-z]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 32));
+}
+
+export function foldName(name: string): string {
+  return name.replace(/[A-Z]/g, (c) =>
+    String.fromCharCode(c.charCodeAt(0) + 32),
+  );
 }
 
 // True when `token` is the bare keyword `word` (given in upper case).
 export function isWord(token: Token | undefined, word: string): boolean {
-  return token?.kind === "word" && token.text.toUpperCase() === word;
-}
-
-// SQLite folds only ASCII letters when it compares identifiers.
-export function foldName(name: string): string {
-  return name.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return token?.kind === "word" && upperAscii(token.text) === word;
 }
 
 // A one-line, bounded excerpt of a statement for a finding's message.

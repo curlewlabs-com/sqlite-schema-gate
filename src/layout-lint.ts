@@ -4,6 +4,14 @@
 
 import type { Finding } from "./allowlist";
 import type { SchemaSnapshot } from "./schema";
+import { isWord, upperAscii } from "./sql-text";
+import {
+  declaresPrimaryKeyDesc,
+  hasLengthCheck,
+  readTableSql,
+  writesOnDelete,
+  type TableDefinition,
+} from "./table-sql";
 
 export type LayoutRule =
   | "strict-required"
@@ -15,10 +23,14 @@ export type LayoutRule =
 
 export type LayoutFinding = Finding<LayoutRule>;
 
-// Identifiers are spliced into patterns over the table's CREATE text, so a
-// name carrying a pattern character must match only itself.
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// The table's CREATE text as definitions, or null when sqlite_master holds
+// none this reader can split; a rule that needs the text then finds no
+// clause in it, and reports.
+function definitionOf(
+  snapshot: SchemaSnapshot,
+  table: string,
+): TableDefinition | null {
+  return readTableSql(snapshot.tableSql.get(table) ?? "");
 }
 
 function columnsOf(snapshot: SchemaSnapshot, table: string) {
@@ -55,7 +67,7 @@ export function blobPkOrUniqueNeedsCheckLength(
 ): LayoutFinding[] {
   const findings: LayoutFinding[] = [];
   for (const t of snapshot.tables) {
-    const sql = snapshot.tableSql.get(t.name) ?? "";
+    const def = definitionOf(snapshot, t.name);
     const fkCols = new Set(foreignKeysOf(snapshot, t.name).map((f) => f.from));
     const uniqueCols = new Set<string>();
     for (const idx of indexesOf(snapshot, t.name)) {
@@ -69,11 +81,7 @@ export function blobPkOrUniqueNeedsCheckLength(
       if (c.type !== "BLOB") continue;
       if (fkCols.has(c.name)) continue;
       if (c.pk === 0 && !uniqueCols.has(c.name)) continue;
-      const lengthCheck = new RegExp(
-        `CHECK\\s*\\(\\s*length\\s*\\(\\s*${escapeRegExp(c.name)}\\s*\\)\\s*=\\s*\\d+\\s*\\)`,
-        "i",
-      );
-      if (!lengthCheck.test(sql)) {
+      if (!def || !hasLengthCheck(def, c.name)) {
         findings.push({
           rule: "blob-pk-or-unique-needs-check-length",
           table: t.name,
@@ -119,28 +127,15 @@ export function fkTypeMatchesParent(snapshot: SchemaSnapshot): LayoutFinding[] {
 
 // A foreign key's delete behavior should be a written decision. The pragma
 // reports an omitted ON DELETE and an explicit NO ACTION identically, so this
-// reads the CREATE text for the clause. NO ACTION can be right (a parent that
-// is never deleted), and writing it down is what says so.
+// reads the CREATE text for the clause: in the column's own definition, or
+// in a FOREIGN KEY constraint naming the column. NO ACTION can be right (a
+// parent that is never deleted), and writing it down is what says so.
 export function fkExplicitOnDelete(snapshot: SchemaSnapshot): LayoutFinding[] {
   const findings: LayoutFinding[] = [];
   for (const t of snapshot.tables) {
-    const sql = snapshot.tableSql.get(t.name) ?? "";
+    const def = definitionOf(snapshot, t.name);
     for (const fk of foreignKeysOf(snapshot, t.name)) {
-      const from = escapeRegExp(fk.from);
-      const parent = escapeRegExp(fk.table);
-      // The column form, `<from> ... REFERENCES <parent>(...) ... ON DELETE`,
-      // and the table form, `FOREIGN KEY (<from>) REFERENCES ... ON DELETE`.
-      // Each needs ON DELETE before the comma or parenthesis that ends the
-      // column or constraint.
-      const colLevel = new RegExp(
-        `\\b${from}\\b[^,()]*REFERENCES\\s+${parent}\\b[^,]*ON\\s+DELETE\\b`,
-        "i",
-      );
-      const tableLevel = new RegExp(
-        `FOREIGN\\s+KEY\\s*\\([^)]*\\b${from}\\b[^)]*\\)\\s*REFERENCES\\s+${parent}\\b[^,]*ON\\s+DELETE\\b`,
-        "i",
-      );
-      if (!colLevel.test(sql) && !tableLevel.test(sql)) {
+      if (!def || !writesOnDelete(def, fk.from, fk.table)) {
         findings.push({
           rule: "fk-explicit-on-delete",
           table: t.name,
@@ -179,13 +174,17 @@ export function integerPkNeedsAutoincrementOnFkTarget(
     const pkCols = columnsOf(snapshot, t.name).filter((c) => c.pk > 0);
     if (pkCols.length !== 1) continue;
     const pk = pkCols[0]!;
-    if (pk.type !== "INTEGER") continue;
-    const sql = snapshot.tableSql.get(t.name) ?? "";
-    const autoinc = new RegExp(
-      `\\b${escapeRegExp(pk.name)}\\b\\s+INTEGER\\s+PRIMARY\\s+KEY\\s+AUTOINCREMENT\\b`,
-      "i",
-    );
-    if (!autoinc.test(sql)) {
+    if (upperAscii(pk.type) !== "INTEGER") continue;
+    const def = definitionOf(snapshot, t.name);
+    // Only a rowid alias can reuse a freed id, and only it may carry
+    // AUTOINCREMENT: not the key of a WITHOUT ROWID table, nor one declared
+    // `PRIMARY KEY DESC` in its column, which SQLite does not alias.
+    if (def?.withoutRowid || (def && declaresPrimaryKeyDesc(def, pk.name))) {
+      continue;
+    }
+    // SQLite allows AUTOINCREMENT on an INTEGER PRIMARY KEY only, so the word
+    // anywhere in this single-key table's text is that key's.
+    if (!def?.tokens.some((tok) => isWord(tok, "AUTOINCREMENT"))) {
       findings.push({
         rule: "integer-pk-needs-autoincrement-on-fk-target",
         table: t.name,

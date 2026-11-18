@@ -180,6 +180,21 @@ describe("blob-pk-or-unique-needs-check-length", () => {
       ),
     ).toEqual([]);
   });
+
+  // The CHECK is read as tokens: a quoted column name and `==` are the same
+  // check to SQLite, and a string default that spells one is not a check.
+  it("reads the length CHECK as SQLite does, not as text", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE quoted (slug BLOB PRIMARY KEY CHECK (length("slug") == 16)) STRICT;
+         CREATE TABLE spelled (
+           slug BLOB PRIMARY KEY,
+           note TEXT DEFAULT 'CHECK (length(slug) = 16)'
+         ) STRICT`,
+        "blob-pk-or-unique-needs-check-length",
+      ),
+    ).toEqual(["spelled.slug"]);
+  });
 });
 
 describe("fk-type-matches-parent", () => {
@@ -242,6 +257,76 @@ describe("fk-explicit-on-delete", () => {
       ),
     ).toEqual(["books.editor_id"]);
   });
+
+  // SQLite lets table constraints follow one another with no comma, and each
+  // keeps its own clauses; a single-quoted name in the column list is a name.
+  it("reads each of several adjacent table constraints on its own", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+         CREATE TABLE books (
+           id INTEGER PRIMARY KEY,
+           author_id INTEGER,
+           editor_id INTEGER,
+           agent_id INTEGER,
+           FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE CASCADE
+           FOREIGN KEY (editor_id) REFERENCES authors(id)
+           CONSTRAINT agent FOREIGN KEY ('agent_id') REFERENCES authors(id) ON DELETE SET NULL
+         ) STRICT`,
+        "fk-explicit-on-delete",
+      ),
+    ).toEqual(["books.editor_id"]);
+  });
+
+  // Two keys over the same column and parent are each a decision; the one
+  // that writes no clause is not covered by the one that does.
+  it("reads each of two keys over one column and parent", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+         CREATE TABLE books (
+           id INTEGER PRIMARY KEY,
+           author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE,
+           FOREIGN KEY (author_id) REFERENCES authors(id)
+         ) STRICT`,
+        "fk-explicit-on-delete",
+      ),
+    ).toEqual(["books.author_id", "books.author_id"]);
+  });
+
+  // A column named with a dotless i (U+0131) that looks like PRIMARY is a
+  // column, and its foreign key's clause is read from it.
+  it("reads a column whose name only looks like a constraint keyword", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+         CREATE TABLE books (
+           id INTEGER PRIMARY KEY,
+           pr\u0131mary INTEGER REFERENCES authors(id) ON DELETE CASCADE
+         ) STRICT`,
+        "fk-explicit-on-delete",
+      ),
+    ).toEqual([]);
+  });
+
+  // The clause is the key's own, read as tokens: a quoted parent or a MATCH
+  // clause before it still writes it, and a string that spells it does not.
+  it("reads the ON DELETE clause as SQLite does, not as text", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+         CREATE TABLE books (
+           id INTEGER PRIMARY KEY,
+           author_id INTEGER REFERENCES "authors"(id) ON DELETE CASCADE,
+           editor_id INTEGER REFERENCES authors(id) MATCH SIMPLE ON DELETE SET NULL,
+           agent_id INTEGER REFERENCES Authors(id) DEFAULT 'ON DELETE CASCADE',
+           "Reviewer_Id" INTEGER,
+           FOREIGN KEY ("reviewer_id") REFERENCES [authors] ON DELETE NO ACTION
+         ) STRICT`,
+        "fk-explicit-on-delete",
+      ),
+    ).toEqual(["books.agent_id"]);
+  });
 });
 
 describe("integer-pk-needs-autoincrement-on-fk-target", () => {
@@ -256,6 +341,59 @@ describe("integer-pk-needs-autoincrement-on-fk-target", () => {
            id INTEGER PRIMARY KEY,
            author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE,
            publisher_id INTEGER REFERENCES publishers(id) ON DELETE CASCADE
+         ) STRICT`,
+        "integer-pk-needs-autoincrement-on-fk-target",
+      ),
+    ).toEqual(["authors"]);
+  });
+
+  // Neither the key of a WITHOUT ROWID table nor one declared
+  // `PRIMARY KEY DESC` is a rowid alias: neither reuses a freed rowid, and
+  // SQLite refuses AUTOINCREMENT on both.
+  it("stays silent on an INTEGER PRIMARY KEY that is not a rowid alias", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE clustered (id INTEGER PRIMARY KEY, name TEXT) STRICT, WITHOUT ROWID;
+         CREATE TABLE descending (id INTEGER PRIMARY KEY DESC) STRICT;
+         CREATE TABLE books (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           clustered_id INTEGER REFERENCES clustered(id) ON DELETE CASCADE,
+           descending_id INTEGER REFERENCES descending(id) ON DELETE CASCADE
+         ) STRICT`,
+        "integer-pk-needs-autoincrement-on-fk-target",
+      ),
+    ).toEqual([]);
+  });
+
+  // SQLite folds only ASCII letters, so a name or a type spelled with a
+  // dotless i (U+0131) is not the keyword or the type it looks like: a
+  // column so named is not AUTOINCREMENT, and a key so typed is not INTEGER.
+  it("folds keywords and types as SQLite does, ASCII only", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE authors (id INTEGER PRIMARY KEY, auto\u0131ncrement TEXT) STRICT;
+         CREATE TABLE agents (id \u0131nteger PRIMARY KEY);
+         CREATE TABLE books (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE,
+           agent_id INTEGER REFERENCES agents(id) ON DELETE CASCADE
+         ) STRICT`,
+        "integer-pk-needs-autoincrement-on-fk-target",
+      ),
+    ).toEqual(["authors"]);
+  });
+
+  // A string default that spells AUTOINCREMENT is not the keyword.
+  it("does not read AUTOINCREMENT out of a string", async () => {
+    expect(
+      await findings(
+        `CREATE TABLE authors (
+           id INTEGER PRIMARY KEY,
+           note TEXT DEFAULT 'id INTEGER PRIMARY KEY AUTOINCREMENT'
+         ) STRICT;
+         CREATE TABLE books (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           author_id INTEGER REFERENCES authors(id) ON DELETE CASCADE
          ) STRICT`,
         "integer-pk-needs-autoincrement-on-fk-target",
       ),
