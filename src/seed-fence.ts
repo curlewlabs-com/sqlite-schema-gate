@@ -123,10 +123,14 @@ function toKey(table: string, key: SeedKey): Key {
         (stray.length > 0 ? ` and a collation for ${stray.join(", ")}` : ""),
     );
   }
+  const [first] = columns;
   return {
     columns,
     collations: columns.map((c) => collate.get(c) ?? "BINARY"),
-    label: columns.length === 1 ? columns[0]! : `(${columns.join(", ")})`,
+    label:
+      columns.length === 1 && first !== undefined
+        ? first
+        : `(${columns.join(", ")})`,
   };
 }
 
@@ -316,7 +320,7 @@ function keyIdentity(
   const parts: string[] = [];
   const texts: string[] = [];
   let known = true;
-  key.columns.forEach((column, k) => {
+  for (const [k, column] of key.columns.entries()) {
     const at = columns.indexOf(column);
     const value = at === -1 ? undefined : values[at];
     if (value === undefined) {
@@ -329,7 +333,7 @@ function keyIdentity(
           `distinct from the rows already written above it.`,
       });
       known = false;
-      return;
+      continue;
     }
     if (value.kind === "null") {
       findings.push({
@@ -343,7 +347,7 @@ function keyIdentity(
           `added again on every apply. Write the identity value.`,
       });
       known = false;
-      return;
+      continue;
     }
     if (value.kind === "number" && !comparableNumber(value.text)) {
       findings.push({
@@ -357,15 +361,19 @@ function keyIdentity(
           `string.`,
       });
       known = false;
-      return;
+      continue;
     }
     parts.push(identityKey(value, key.collations[k] ?? "BINARY"));
     texts.push(value.text);
-  });
+  }
   if (!known) return null;
+  const [first] = texts;
   return {
     value: JSON.stringify(parts),
-    text: texts.length === 1 ? texts[0]! : `(${texts.join(", ")})`,
+    text:
+      texts.length === 1 && first !== undefined
+        ? first
+        : `(${texts.join(", ")})`,
   };
 }
 

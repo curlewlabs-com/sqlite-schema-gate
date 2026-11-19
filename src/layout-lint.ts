@@ -79,8 +79,8 @@ function rowidAlias(
   table: string,
 ): ColumnInfo | null {
   const pkCols = columnsOf(snapshot, table).filter((c) => c.pk > 0);
-  if (pkCols.length !== 1) return null;
-  const pk = pkCols[0]!;
+  const [pk] = pkCols;
+  if (pkCols.length !== 1 || pk === undefined) return null;
   if (upperAscii(pk.type) !== "INTEGER") return null;
   const def = definitionOf(snapshot, table);
   if (def?.withoutRowid || (def && declaresPrimaryKeyDesc(def, pk.name))) {
@@ -289,9 +289,10 @@ export function fkNeedsLeadIndex(snapshot: SchemaSnapshot): LayoutFinding[] {
     // One foreign key is all the rows sharing its id. Its check looks the
     // child up by every one of its columns at once, so an index that leads
     // with any of them can serve it.
-    const byId = new Map<number, ForeignKey[]>();
+    const byId = new Map<number, [ForeignKey, ...ForeignKey[]]>();
     for (const fk of foreignKeysOf(snapshot, t.name)) {
-      byId.set(fk.id, [...(byId.get(fk.id) ?? []), fk]);
+      const prior = byId.get(fk.id);
+      byId.set(fk.id, prior === undefined ? [fk] : [...prior, fk]);
     }
     for (const rows of byId.values()) {
       rows.sort((x, y) => x.seq - y.seq);
@@ -309,7 +310,7 @@ export function fkNeedsLeadIndex(snapshot: SchemaSnapshot): LayoutFinding[] {
         return lead != null && inKey(lead);
       });
       if (!hasLeadIndex) {
-        const first = rows[0]!;
+        const first = rows[0];
         const from = rows.map((fk) => fk.from).join(", ");
         const to = rows.map((fk) => fk.to || "rowid").join(", ");
         findings.push({
