@@ -35,7 +35,7 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Typecheck
         run: bun run typecheck
-      - uses: curlewlabs-com/ci-baseline/typed@e0c1822299b1d02e8897aa6e87b70a12728934bf # v0.3.2
+      - uses: curlewlabs-com/ci-baseline/typed@bfb113336d98bcaad9408e021566d985ecf51bde # v0.3.3
       - name: Test on D1 in workerd
         run: bun run test
       - name: Pack
@@ -61,7 +61,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: curlewlabs-com/ci-baseline@e0c1822299b1d02e8897aa6e87b70a12728934bf # v0.3.2
+      - uses: curlewlabs-com/ci-baseline@bfb113336d98bcaad9408e021566d985ecf51bde # v0.3.3
 
   # The one check branch protection requires, so adding a job means adding it
   # to needs here rather than editing the repository's settings.
