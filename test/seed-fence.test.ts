@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { checkDataSeed, type SeedTables } from "../src/index";
 
 // The fence is a whitelist over a file applied on every deploy, so the cases

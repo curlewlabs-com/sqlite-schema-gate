@@ -30,6 +30,10 @@ bun run test
 The tests run inside workerd through `@cloudflare/vitest-plugin`, with an
 in-process D1 database; they need no Cloudflare account.
 
+eslint runs in CI through ci-baseline. To run the same check locally, after
+installing dependencies: `<a ci-baseline checkout>/lib/lint-local.sh`. It runs
+the ci-baseline commit this repository's workflows pin.
+
 ## What a change owes
 
 - A test for the behavior it adds or fixes, on D1 when the behavior depends on

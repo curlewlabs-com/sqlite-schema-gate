@@ -99,7 +99,19 @@ async function pragmaByName<T>(
   const results = await db.batch<T>(
     names.map((name) => db.prepare(sqlFor(name))),
   );
-  return new Map(names.map((name, i) => [name, results[i]!.results]));
+  return new Map(
+    names.map((name, i) => {
+      const result = results[i];
+      // D1 answers a batch with one result per statement; a shorter answer is
+      // its contract broken, reported rather than read as a TypeError.
+      if (result === undefined) {
+        throw new Error(
+          `sqlite-schema-gate: D1 returned ${results.length} results for a batch of ${names.length}`,
+        );
+      }
+      return [name, result.results];
+    }),
+  );
 }
 
 export async function readSchema(db: SchemaDatabase): Promise<SchemaSnapshot> {
