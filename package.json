@@ -1,6 +1,6 @@
 {
   "name": "@curlewlabs-com/sqlite-schema-gate",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Lint a SQLite or Cloudflare D1 schema and its migrations: table-layout rules read from the applied schema, a migration lint for silent row loss and silent changes in meaning, and a fence for a seed file applied on every deploy.",
   "license": "MIT OR Apache-2.0",
   "author": "Curlew Labs",
